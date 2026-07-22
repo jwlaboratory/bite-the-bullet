@@ -76,3 +76,10 @@ early_rdma vs `cache_aware` (SGLang default router, no warming):
 On plain ART the prefix never repeats deeply enough to fire, so early_rdma ≈
 cache_aware — it neither helps nor hurts ordinary traffic. Positive = lower TTFT.
 Raw numbers + field definitions in [`results.json`](results.json).
+
+## Charts
+
+`python3 2-bite-the-bullet/make_charts.py` renders these from `results.json`:
+
+![TTFT reduction by setup](charts/speedup.png)
+![Mean TTFT, cache_aware vs early_rdma](charts/ttft.png)
