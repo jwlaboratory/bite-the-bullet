@@ -265,8 +265,25 @@ def main():
                      "cache_aware_mean_ttft_synthetic": ca_syn, "early_rdma_mean_ttft_synthetic": bt_syn})
     print("\n(positive = early_rdma lower mean TTFT than cache_aware, the SGLang default router)")
 
-    out = {"constants": {"X": X_THRESHOLD, "Y": Y_PREFIX_BLOCKS, "Z": Z_WINDOW_S, "M": M_WARM_COPIES},
-           "dataset": "Bursted-ART/test.jsonl", "baseline": "cache_aware (no warming)", "setups": rows}
+    out = {
+        "constants": {
+            "X": X_THRESHOLD, "Y": Y_PREFIX_BLOCKS, "Z": Z_WINDOW_S, "M": M_WARM_COPIES,
+            "_definitions": {
+                "X": "BTB_THRESHOLD: same-prefix arrivals within Z needed to fire",
+                "Y": "BTB_PREFIX_BLOCKS: shared-prefix length in blocks, matched on AND copied (256 blocks x 256 tok = the 65,536-tok burst prefix)",
+                "Z": "BTB_WINDOW_S: detection window in seconds",
+                "M": "BTB_WARM_COPIES: number of REPLICAS (nodes) to warm; each replica is n_gpus GPUs tensor-parallel, so a copy is sharded across that node's GPUs",
+            },
+        },
+        "dataset": "Bursted-ART/test.jsonl", "baseline": "cache_aware (SGLang default router, no warming)",
+        "field_definitions": {
+            "synthetic_improvement_pct": "(cache_aware - early_rdma) / cache_aware * 100, mean TTFT over the synthetic (bursty) windows only; positive = early_rdma faster",
+            "mixed_improvement_pct": "same ratio over ALL windows (synthetic + real ART); the realistic average (BTB is inert on non-bursty ART windows)",
+            "cache_aware_mean_ttft_synthetic": "baseline mean time-to-first-token (s), request-weighted, synthetic windows",
+            "early_rdma_mean_ttft_synthetic": "early_rdma mean time-to-first-token (s), request-weighted, synthetic windows",
+        },
+        "setups": rows,
+    }
     (HERE / "results.json").write_text(json.dumps(out, indent=2) + "\n")
     print("wrote results.json")
     return out

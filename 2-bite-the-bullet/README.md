@@ -12,9 +12,14 @@ runnable head-to-head that reports the result.
 | Constant | Meaning | Value |
 |----------|---------|-------|
 | **X** | repeats needed to fire | 2 |
-| **Y** | shared-prefix length — matched on **and** copied | the whole prefix |
+| **Y** | shared-prefix length — matched on **and** copied | 256 blocks (the 65,536-tok burst prefix) |
 | **Z** | detection window (seconds) | 1 |
-| **M** | HBM copies to warm | 4 |
+| **M** | **replicas (nodes)** to warm | 4 |
+
+**M is replicas, not GPUs.** A replica is `n_gpus` GPUs serving tensor-parallel —
+weights and KV are *sharded* across them, so one node holds one sharded copy of
+the prefix KV. M=4 replicates that copy onto 4 separate nodes. (Every setup here
+runs 4 replicas, so M=4 warms the whole cluster.)
 
 A prefix a node does not hold is recomputed, so putting the KV on a replica
 *before* its first same-prefix request lands saves that recompute. `least_load`
