@@ -136,14 +136,12 @@ requests sharing a prefix of **≥ 16 blocks (~8k tokens)**, all arriving inside
   job. Tellingly, ART is already a specialized decoded-LLM-response / agent-eval
   corpus, which is exactly why we build on it.
 
-![Public LLM traces vs. a synthetic data-labeling workload. Left: the largest
-synchronized deep-prefix fan-out per dataset (log scale) — Mooncake 2, ART 25,
-our synthetic 500. Right: fan-out collapses as you demand a longer shared prefix
-in the real traces, while the synthetic workload stays flat.](workload/audit/results/burst_audit_chart.png)
+![Public LLM traces measured for the pattern early_rdma targets. Left: the largest
+synchronized deep-prefix fan-out per dataset (log scale) — Mooncake 2, ART 25, both
+at or below the 20-way threshold. Right: fan-out collapses as you demand a longer
+shared prefix in the real traces.](workload/audit/results/burst_audit_chart.png)
 
-As a control, we ran the same detector on Bursted-ART itself: it fires at a
-**500-way** fan-out in a 1-second window, confirming the null results above are a
-real absence, not a broken detector. The takeaway is simple — these datasets were
+The takeaway is simple — these datasets were
 captured on demo, arena, and short-lived chat/coding endpoints, not on production
 endpoints running data-labeling or multi-agent fan-out jobs, so none of them
 represent the regime this mechanism is for. That is why we built one.
@@ -160,12 +158,8 @@ The current dataset work lives outside the experiment harness in
 Hugging Face repo:
 [shreybirmiwal/Bursted-ART](https://huggingface.co/datasets/shreybirmiwal/Bursted-ART)
 
-Local generated datasets:
-
-- `workload/generate/out/Bursted-ART/`
-- `workload/generate/out/Bursted-ART-60s/`
-
-Each generated dataset folder contains:
+Local generated dataset: `workload/generate/out/Bursted-ART/` (gitignored —
+regenerate with the command below). The folder contains:
 
 - `train.jsonl`
 - `test.jsonl`
@@ -206,28 +200,19 @@ The split is by complete trace window, not individual request row. That is
 important because requests inside one burst are correlated. Row-level splitting
 would leak burst structure from train to test.
 
-There are two generated variants:
-
-- `Bursted-ART`: synthetic bursts span 1 second.
-- `Bursted-ART-60s`: the same recipe, but synthetic bursts span 60 seconds.
-
-The 1-second variant is the hard case: the burst arrives fast, so there may not
-be enough time for RDMA to pay back. The 60-second variant is the ideal paper
-case: reuse is sustained long enough that early movement can help.
+The synthetic bursts span **60 seconds**: reuse is sustained long enough that
+early movement can pay back, which is the regime the paper's headline result
+comes from. (An earlier 1-second fast-burst variant — the hard case where the
+burst is over before the copy lands — is archived under
+`archive/datasets/`; regenerate it with `--synthetic-burst-window-s 1` if
+needed.)
 
 Generate the uploaded dataset:
 
 ```bash
 python3 workload/generate/generate_combined_dataset.py \
-  --out-dir workload/generate/out/Bursted-ART
-```
-
-Generate the 60-second variant:
-
-```bash
-python3 workload/generate/generate_combined_dataset.py \
   --synthetic-burst-window-s 60 \
-  --out-dir workload/generate/out/Bursted-ART-60s
+  --out-dir workload/generate/out/Bursted-ART
 ```
 
 Upload:

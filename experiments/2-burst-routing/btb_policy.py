@@ -1,15 +1,22 @@
-"""BTB `early_rdma` as an inference-sim routing policy (mechanistic port).
+"""BTB `early_rdma` -- the whole method, as an inference-sim routing policy.
 
-This reimplements the core mechanism described in ../results/PAPER.md so it can
-run head-to-head against least_load / cache_aware inside inference-sim, under the
-same RDMA congestion model. It is NOT the trained utility gate -- burst
-detection here is a simple threshold rule, not the learned gate -- but the
-placement + routing mechanics match:
+The rule is deliberately simple and fixed (no per-model learning):
 
-  1. Detect a sustained shared-prefix burst (a prefix seen >= THRESHOLD times in
-     a WINDOW marks it "active" for a HORIZON).
+    If the same Y-block prefix is seen X times within Z seconds, don't wait for
+    a queue to build -- bite the bullet and replicate its KV to the least-busy
+    replicas, then route later same-prefix requests across those warm copies.
+
+    X = THRESHOLD   (repeats needed to fire)      default 4
+    Y = KEY_BLOCKS  (prefix length that must match) default 4 blocks
+    Z = WINDOW_S    (detection window)             default 2 s
+    replicate to WARM_COPIES HBM copies            default 4
+
+Mechanics:
+
+  1. Detect the burst: a prefix seen >= X times inside a Z-second window becomes
+     "active" for a HORIZON (so later requests keep routing to the warm copies).
   2. Once active, and once a source copy exists in some node's HBM, RDMA-copy the
-     prefix's KV onto the least-busy replicas until it has WARM_COPIES HBM copies.
+     prefix KV onto the least-busy replicas until it has WARM_COPIES HBM copies.
   3. Route active-prefix requests to the least-loaded *warm* replica; fall back to
      cache_aware otherwise.
 
@@ -60,12 +67,12 @@ class PendingWarm:
 class EarlyRdma:
     def __init__(self, cfg):
         self.cfg = cfg
-        self.key_blocks = int(getattr(cfg, "BTB_KEY_BLOCKS", 4))
-        self.warm_blocks = int(getattr(cfg, "BTB_WARM_BLOCKS", 24))
-        self.threshold = int(getattr(cfg, "BTB_THRESHOLD", 4))
-        self.window = float(getattr(cfg, "BTB_WINDOW_S", 2.0))
-        self.horizon = float(getattr(cfg, "BTB_HORIZON_S", 120.0))
-        self.copies = int(getattr(cfg, "BTB_WARM_COPIES", 4))
+        self.key_blocks = int(getattr(cfg, "BTB_KEY_BLOCKS", 4))    # Y: prefix length to match on
+        self.threshold = int(getattr(cfg, "BTB_THRESHOLD", 4))      # X: repeats to fire
+        self.window = float(getattr(cfg, "BTB_WINDOW_S", 2.0))      # Z: detection window (s)
+        self.copies = int(getattr(cfg, "BTB_WARM_COPIES", 4))       # how many HBM copies to warm
+        self.warm_blocks = int(getattr(cfg, "BTB_WARM_BLOCKS", 24)) # how much of the prefix KV to copy
+        self.horizon = float(getattr(cfg, "BTB_HORIZON_S", 120.0))  # how long a fired prefix stays active
         self.hist = {}          # key -> list of recent arrival times
         self.active = {}        # key -> time the prefix stops being "active"
         self.pending = []       # scheduled warm copies not yet resident

@@ -1,38 +1,54 @@
 # 3 · early_rdma — the headline claim
 
-Predict sustained shared-prefix reuse, then RDMA-copy existing KV into HBM on
+Detect a sustained shared-prefix burst, then RDMA-copy existing KV into HBM on
 less-busy replicas **before** later requests arrive.
 
-The gate (the "utility gate") decides when biting the bullet — paying to move KV
-now — beats recomputing it later:
+## The rule (this is the whole method)
 
-1. detect repeated prefix reuse;
-2. require an existing source KV copy in HBM;
-3. RDMA-copy that KV to less-busy replicas, ahead of the burst.
+> If the same **Y-block prefix** is seen **X times within Z seconds**, don't wait
+> for a queue to build — **bite the bullet and replicate** its KV to the
+> least-busy replicas, then route later same-prefix requests across those warm
+> copies.
 
-No seed-prefill / fake-prefill policy is part of the active claim; those are in
+Defaults: **X = 4** repeats, **Y = 4** blocks, **Z = 2 s**, replicate to **4**
+HBM copies. It is a fixed rule, not a per-model learned gate — the same
+thresholds run on every model/hardware setup.
+
+The mechanism is one small file: [`../2-burst-routing/btb_policy.py`](../2-burst-routing/btb_policy.py)
+(`EarlyRdma`). Experiment 2 runs it head-to-head against `least_load` /
+`cache_aware` on the real simulator; this experiment reports how it does on the
+Bursted-ART trace across model/hardware setups.
+
+No seed-prefill / fake-prefill policy is part of the claim; those live in
 [`../../archive/superseded-experiments/`](../../archive/superseded-experiments/).
+An earlier *learned* per-model utility gate was explored and set aside — it is
+not the claim — and is archived under
+[`../../archive/learned-utility-gate/`](../../archive/learned-utility-gate/).
 
 ## Files
 
 | File | What |
 |------|------|
-| `btb_utility_gate.py` | main simulator harness (the policy) |
-| `btb_art_model_hardware_sweep.py` | optional model × hardware sweep runner |
-| `btb_result_summary.py` | summarize result JSON files |
 | `PAPER.md` | short paper memo — **the current claim** |
-| `results/` | raw filtered `early_rdma` result dumps (`results.json` is the headline run) |
+| `results/results.json` | raw filtered `early_rdma` result dump (the headline run) |
 
-Older utility-gate result dumps and sweeps are archived under
-[`../../archive/old-results/`](../../archive/old-results/).
+The policy itself and a runnable demo live in experiment 2:
 
-## Run
+| File | What |
+|------|------|
+| [`../2-burst-routing/btb_policy.py`](../2-burst-routing/btb_policy.py) | the `early_rdma` rule (X/Y/Z + replicate) |
+| [`../2-burst-routing/run_burst.py`](../2-burst-routing/run_burst.py) | runnable demo on the simulator |
+
+## Run the mechanism
 
 ```bash
 # needs the sibling inference-sim checkout (see repo root README)
-python3 experiments/3-early-rdma/btb_utility_gate.py      # writes results/btb_utility_gate_results.json
-python3 experiments/3-early-rdma/btb_result_summary.py    # summarize results/*.json
+cd ../2-burst-routing
+python3 run_burst.py      # drives early_rdma vs least_load vs cache_aware
 ```
+
+`results/results.json` is a frozen artifact from the Bursted-ART model/hardware
+sweep; the script that produced that exact sweep is not kept in the active tree.
 
 ## Result
 

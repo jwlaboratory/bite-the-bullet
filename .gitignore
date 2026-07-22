@@ -5,3 +5,6 @@ __pycache__/
 trace.csv
 output.csv
 workload/generate/out/
+# archived (regenerable) datasets kept locally, not in git — but track the note
+archive/datasets/*
+!archive/datasets/README.md

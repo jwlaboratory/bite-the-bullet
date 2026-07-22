@@ -55,11 +55,7 @@ We created **Bursted-ART** by combining real ART traffic with synthetic hot-pref
 - **Synthetic windows:** controlled same-prefix fanout. Each synthetic window has 8 burst jobs, 500 requests per burst, a 65,536-token shared prefix, a 256-token unique suffix, 1 output token, and 120 decoy jobs.
 - **Split:** 40 complete windows total: 10 train, 30 test. The split is by whole window, not by row.
 - **Size:** 102,400 rows total: 25,600 train and 76,800 test.
-
-We use two versions:
-
-- **Bursted-ART:** synthetic bursts span 1 second.
-- **Bursted-ART-60s:** same generation, but synthetic bursts span 60 seconds.
+- **Burst span:** each synthetic burst's 500 requests arrive over 60 seconds — the sustained-reuse regime where prefetch has time to pay back.
 
 In the tables:
 
@@ -84,10 +80,8 @@ Positive numbers mean lower TTFT than baseline.
 
 | Case | Mean TTFT | P95 TTFT | Speedup |
 | --- | ---: | ---: | ---: |
-| Best: 60s synthetic `kimi_k2_h100x8` | +15.01% | +3.93% | 1.1766x |
-| Mixed: 60s mixed `kimi_k2_h100x8` | +8.60% | +3.37% | 1.0941x |
-| Medium: 1s mixed `70b_h100x4_base` | +2.26% | +1.59% | 1.0231x |
-| Bad tail: 1s synthetic `dense1t_b300x4` | -3.05% | -16.91% | 0.9704x |
+| Best: synthetic `kimi_k2_h100x8` | +15.01% | +3.93% | 1.1766x |
+| Mixed: mixed `kimi_k2_h100x8` | +8.60% | +3.37% | 1.0941x |
 
 ## Paper Shape
 
@@ -95,7 +89,9 @@ The paper should be honest and simple:
 
 - **Best case:** long sustained reuse.
 - **Realistic case:** mixed traces still improve.
-- **Failure case:** dense/tail-sensitive workloads can regress.
+- **Failure mode (qualitative):** if the burst ends before the copy lands, or on
+  dense/tail-sensitive workloads, the extra movement can hurt tail latency — see
+  "When It Works" above. It is a break-even, not an always-win.
 
 The right claim is not "always prefetch." It is:
 

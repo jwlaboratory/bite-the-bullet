@@ -5,8 +5,7 @@ Two panels:
   A. Largest synchronized deep-prefix fan-out (>=16 blocks ~= 8k tokens, <=10s)
      per dataset -- the headline magnitude comparison, log scale.
   B. Same-prefix fan-out vs required shared-prefix depth (60s window) -- the
-     collapse curve: real traces fall off as you demand a longer shared prefix,
-     the synthetic control stays flat at its burst size.
+     collapse curve: real traces fall off as you demand a longer shared prefix.
 """
 from __future__ import annotations
 
@@ -50,13 +49,12 @@ plt.rcParams.update({
 fig, (axA, axB) = plt.subplots(1, 2, figsize=(12.6, 5.1), gridspec_kw={"wspace": 0.28})
 
 # ---------------------------------------------------------------- Panel A ----
-# Measurable datasets (have prefix + timing), plus the control.
+# Measurable datasets (have prefix + timing).
 bars = [
     ("Mooncake\n(conversation)", deep("Mooncake-conversation"), AQUA),
     ("Mooncake\n(tool-agent)", deep("Mooncake-toolagent"), AQUA),
     ("Mooncake\n(arxiv)", deep("Mooncake-arxiv"), AQUA),
     ("ART-Chat-2.5M", deep("ART-Chat-2.5M"), BLUE),
-    ("Bursted-ART\n(our synthetic)", deep("Bursted-ART-synthetic (CONTROL)"), RED),
 ]
 labels = [b[0] for b in bars]
 vals = [b[1] for b in bars]
@@ -70,8 +68,8 @@ for yi, v in zip(y, vals):
 axA.set_yticks(y)
 axA.set_yticklabels(labels, fontsize=10)
 axA.set_xscale("log")
-axA.set_xlim(1, 1600)
-axA.xaxis.set_major_locator(FixedLocator([1, 2, 5, 10, 25, 100, 500]))
+axA.set_xlim(1, 100)
+axA.xaxis.set_major_locator(FixedLocator([1, 2, 5, 10, 25, 100]))
 axA.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{int(x)}"))
 axA.set_xlabel("Largest synchronized deep-prefix fan-out\n(≥16 blocks ≈ 8k tokens, ≤10 s window)")
 axA.axvline(20, color=INK2, lw=1, ls=(0, (4, 3)), zorder=2)
@@ -88,7 +86,6 @@ xpos = list(range(len(depths)))
 # (label anchor: (x_index, y_value, va) so the near-identical Mooncake tails
 # don't collide -- tool-agent is labelled on its depth-8 plateau instead.)
 series = [
-    ("Bursted-ART (synthetic)", decay("Bursted-ART-synthetic (CONTROL)"), RED, (5, None, "center")),
     ("ART-Chat-2.5M", decay("ART-Chat-2.5M"), BLUE, (5, None, "center")),
     ("Mooncake (tool-agent)", decay("Mooncake-toolagent"), AQUA, (3, 206, "bottom")),
     ("Mooncake (conversation)", decay("Mooncake-conversation"), VIOLET, (5, 4, "center")),
@@ -101,14 +98,14 @@ for name, ys, c, (lx, ly, lva) in series:
     axB.text(lx + dx, yval, name, color=c, fontsize=9.5,
              va=lva, ha="left", fontweight="bold")
 axB.set_yscale("log")
-axB.set_ylim(1, 2200)
+axB.set_ylim(1, 600)
 axB.set_xlim(-0.3, len(depths) - 0.3 + 2.9)
 axB.set_xticks(xpos)
 axB.set_xticklabels([f"{d}\n({d*512//1000 or '½'}k tok)" for d in depths], fontsize=9)
 axB.set_xlabel("Required shared-prefix depth (blocks ≈ tokens)")
 axB.set_ylabel("Max same-prefix fan-out (60 s window)")
 axB.axvspan(3.5, len(depths) - 0.3 + 2.4, color=BLUE, alpha=0.045, zorder=0)
-axB.text(4, 1600, "“deep” regime\n(long shared context)", fontsize=8.5, color=INK2, va="top")
+axB.text(4, 450, "“deep” regime\n(long shared context)", fontsize=8.5, color=INK2, va="top")
 axB.grid(color=GRID, lw=0.8, zorder=0)
 for s in ("top", "right"):
     axB.spines[s].set_visible(False)
