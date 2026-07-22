@@ -21,11 +21,15 @@ No speculative prefill. No seed policy. Just move existing KV.
 
 ## How It Decides
 
-BTB triggers on a simple burst rule:
+BTB triggers on a simple burst rule — four fixed constants, no per-model learning:
 
-> if the same prefix appears enough times inside a short time window, mark that prefix active.
+> if the same **Y**-block prefix arrives **X** times within **Z** seconds, mark it active
+> and replicate its KV to the **M** least-busy replicas.
 
-After a prefix is active, later requests with that prefix try to prefetch its KV.
+After a prefix is active, later requests with that prefix route to a warm copy.
+A sweep (`../2-burst-routing/sweep_params.py`) finds X and Z largely insensitive
+(frozen at X=2, Z=1 s), Y set to the whole shared prefix, and M the one real
+lever (more copies = more spread, bounded by node count and warming cost).
 
 ## Where It Sends KV
 

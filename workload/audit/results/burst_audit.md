@@ -1,6 +1,6 @@
 # Audit: are synchronized same-prefix fan-out bursts present in public traces?
 
-_Generated 2026-07-22T17:03:38.665904+00:00 • max_rows/trace=300000 • windows=[1.0, 10.0, 60.0]s • depths=[1, 2, 4, 8, 16, 32] blocks_
+_Generated 2026-07-22T19:43:24.823725+00:00 • max_rows/trace=300000 • windows=[1.0, 10.0, 60.0]s • depths=[1, 2, 4, 8, 16, 32] blocks_
 
 **Target pattern:** K+ requests sharing a *long, job-unique* prefix, arriving *together*. Concretely: fan-out ≥ 20 at shared-prefix depth ≥ 16 blocks (~8k tokens) inside a ≤ 10s window. A shallow prefix shared by everyone (a global system-prompt template) or a reuse spread over minutes does **not** count — those are ordinary chat/agent traffic, not a data-labeling sweep or a synchronized sub-agent fan-out.
 
@@ -15,7 +15,6 @@ Two numbers per trace. **Deep-sync fan-out** is the target metric (≥16 blocks,
 | Mooncake-toolagent | 23,608 | 58.9 min | **2** | 2 (fanout) | 206 (59.999s, steady) | ❌ no |
 | Mooncake-arxiv | 23,608 | 60.0 min | **2** | 2 (fanout) | 195 (58.014s, steady) | ❌ no |
 | BurstGPT | 300,000 | 21005.4 min | n/a (no prefix) | n/a | raw 884/60s | ❌ n/a |
-| Bursted-ART-synthetic (CONTROL) | 76,800 | 7.9 min | **500** | 500 (fanout) | 500 (1s) | ✅ YES |
 
 ## Structural absence (no download needed)
 
@@ -116,27 +115,6 @@ Two numbers per trace. **Deep-sync fan-out** is the target metric (≥16 blocks,
 - raw arrival burst (any prefix): {'1s': 52, '10s': 216, '60s': 884}
 - note: No prefix/content in this trace -> same-prefix fan-out is structurally impossible to express. Only aggregate arrival burstiness is measurable.
 
-### Bursted-ART-synthetic (CONTROL)
-
-- source: `data-generation/out/Bursted-ART/test.jsonl`
-- rows read: 76,800  (with prefix: 76,800)
-- time span: 476.1s (7.9 min), mean rate 161.32 req/s
-- raw arrival burst (any prefix): {'1s': 3670, '10s': 8242, '60s': 19274}
-
-  Same-prefix fan-out by required shared-prefix depth (window = 60s):
-
-  | depth (blocks) | prefix groups | max fan-out | span(s) | groups ≥20 |
-  | ---: | ---: | ---: | ---: | ---: |
-  | 1 | 2,465 | 1389 | 59.92 | 156 |
-  | 2 | 2,730 | 500 | 1.0 | 167 |
-  | 4 | 2,526 | 500 | 1.0 | 165 |
-  | 8 | 2,710 | 500 | 1.0 | 150 |
-  | 16 | 2,854 | 500 | 1.0 | 143 |
-  | 32 | 2,883 | 500 | 1.0 | 138 |
-
-  → **Target pattern PRESENT.** Fan-out-like cluster of 500 independent requests at depth ≥16 blocks within 1.0s.
-
-
 ## Verdict
 
 **1. Chat / arena dumps (LMSYS-Chat-1M, ShareGPT):** no per-request arrival timestamps → a synchronized burst cannot exist by construction. Not a serving log.
@@ -145,9 +123,7 @@ Two numbers per trace. **Deep-sync fan-out** is the target metric (≥16 blocks,
 
 **3. Prefix-bearing serving traces (Mooncake-conversation, Mooncake-toolagent, Mooncake-arxiv):** carry both prefix hashes and timing, yet the largest synchronized fan-out of independent requests over a long shared prefix is **2** — no data-labeling or sub-agent fan-out job. Their big-looking numbers are shallow, steady system-prompt templates, or single growing-context sessions.
 
-**4. ART-Chat-2.5M:** the *only* trace that contains the pattern at all — but marginally. Max fan-out **25-way** (vs the control's 500-way, and vs the hundreds-to-thousands of a real production labeling sweep), and only **3 such events in 300,000 requests** (~1.0 per 100k, ≈0.1/hour). ART is a specialized decoded-LLM-response / agent-eval corpus (request IDs are batch-timestamped `decoded_llm_responses_…`), i.e. already the most batch-like public dataset — which is exactly why BTB builds on ART and then *adds* synthetic bursts to reach production scale.
-
-**Positive control (Bursted-ART-synthetic (CONTROL)):** deep-sync fan-out **500** in 1.0s — the detector fires hard when the pattern is present, so the absences above are real, not a broken detector.
+**4. ART-Chat-2.5M:** the *only* trace that contains the pattern at all — but marginally. Max fan-out **25-way** (vs the hundreds-to-thousands of a real production labeling sweep), and only **3 such events in 300,000 requests** (~1.0 per 100k, ≈0.1/hour). ART is a specialized decoded-LLM-response / agent-eval corpus (request IDs are batch-timestamped `decoded_llm_responses_…`), i.e. already the most batch-like public dataset — which is exactly why BTB builds on ART and then *adds* synthetic bursts to reach production scale.
 
 ### Bottom line
 

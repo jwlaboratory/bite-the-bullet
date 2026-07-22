@@ -1,24 +1,21 @@
 """BTB `early_rdma` -- the whole method, as an inference-sim routing policy.
 
-The rule is deliberately simple and fixed (no per-model learning):
+The rule is deliberately simple and fixed -- four constants, no per-model
+learning, no queue-depth trigger:
 
-    If the same Y-block prefix is seen X times within Z seconds, don't wait for
-    a queue to build -- bite the bullet and replicate its KV to the least-busy
+    If the same Y-block prefix arrives X times within Z seconds, don't wait for
+    a queue to build -- bite the bullet and replicate its KV to the M least-busy
     replicas, then route later same-prefix requests across those warm copies.
 
-    X = THRESHOLD   (repeats needed to fire)      default 4
-    Y = KEY_BLOCKS  (prefix length that must match) default 4 blocks
-    Z = WINDOW_S    (detection window)             default 2 s
-    replicate to WARM_COPIES HBM copies            default 4
+    X = THRESHOLD      repeats needed to fire
+    Y = PREFIX_BLOCKS  shared-prefix length -- matched on AND copied
+    Z = WINDOW_S       detection window (seconds)
+    M = WARM_COPIES    how many HBM copies to warm
 
-Mechanics:
-
-  1. Detect the burst: a prefix seen >= X times inside a Z-second window becomes
-     "active" for a HORIZON (so later requests keep routing to the warm copies).
-  2. Once active, and once a source copy exists in some node's HBM, RDMA-copy the
-     prefix KV onto the least-busy replicas until it has WARM_COPIES HBM copies.
-  3. Route active-prefix requests to the least-loaded *warm* replica; fall back to
-     cache_aware otherwise.
+A prefix is "active" exactly while its trailing Z-second count is >= X (checked
+per request -- no separate horizon/TTL). While active, later same-prefix
+requests route to the least-loaded warm replica; otherwise the router falls
+back to cache_aware.
 
 The warm copies pay RDMA cost on the target's timeline and are subject to the
 same fabric contention as ordinary reuse (cfg.RDMA_CONGESTION): a copy to an
@@ -67,31 +64,29 @@ class PendingWarm:
 class EarlyRdma:
     def __init__(self, cfg):
         self.cfg = cfg
-        self.key_blocks = int(getattr(cfg, "BTB_KEY_BLOCKS", 4))    # Y: prefix length to match on
-        self.threshold = int(getattr(cfg, "BTB_THRESHOLD", 4))      # X: repeats to fire
-        self.window = float(getattr(cfg, "BTB_WINDOW_S", 2.0))      # Z: detection window (s)
-        self.copies = int(getattr(cfg, "BTB_WARM_COPIES", 4))       # how many HBM copies to warm
-        self.warm_blocks = int(getattr(cfg, "BTB_WARM_BLOCKS", 24)) # how much of the prefix KV to copy
-        self.horizon = float(getattr(cfg, "BTB_HORIZON_S", 120.0))  # how long a fired prefix stays active
+        # Defaults from sweep_params.py: X and Z are insensitive (frozen small);
+        # Y = the workload's shared prefix (set per run); M is the one real lever.
+        self.prefix_blocks = int(getattr(cfg, "BTB_PREFIX_BLOCKS", 24))  # Y: prefix matched on + copied
+        self.threshold = int(getattr(cfg, "BTB_THRESHOLD", 2))          # X: repeats to fire
+        self.window = float(getattr(cfg, "BTB_WINDOW_S", 1.0))          # Z: detection window (s)
+        self.copies = int(getattr(cfg, "BTB_WARM_COPIES", 4))           # M: HBM copies to warm
         self.hist = {}          # key -> list of recent arrival times
-        self.active = {}        # key -> time the prefix stops being "active"
         self.pending = []       # scheduled warm copies not yet resident
         self.planned = set()    # (key, node.name) copies in flight, to dedupe
         self.stats = {"warm_count": 0, "warm_bytes": 0.0, "warm_busy_s": 0.0}
 
-    # --- burst detection ---
+    # --- burst detection: active iff X arrivals of this Y-prefix in the last Z s ---
     def _key(self, req):
-        k = tuple(req.blocks[: self.key_blocks])
-        return k if len(k) == self.key_blocks else None
+        k = tuple(req.blocks[: self.prefix_blocks])
+        return k if len(k) == self.prefix_blocks else None
 
-    def _detect(self, key, now):
+    def _active(self, key, now):
         h = self.hist.setdefault(key, [])
         h.append(now)
         cut = now - self.window
         while h and h[0] < cut:
             h.pop(0)
-        if len(h) >= self.threshold:
-            self.active[key] = now + self.horizon
+        return len(h) >= self.threshold
 
     # --- warm bookkeeping ---
     def _apply_ready(self, now):
@@ -104,8 +99,7 @@ class EarlyRdma:
                 keep.append(w)
         self.pending = keep
 
-    def _schedule(self, req, nodes, now, key):
-        blocks = req.blocks[: self.warm_blocks]
+    def _schedule(self, req, nodes, now, key, blocks):
         if not blocks:
             return
         # need a source copy in some node's HBM before we can RDMA it anywhere
@@ -139,14 +133,12 @@ class EarlyRdma:
     def route(self, req, nodes, now):
         self._apply_ready(now)
         key = self._key(req)
-        if key is not None:
-            self._detect(key, now)
-            if self.active.get(key, -1.0) >= now:
-                self._schedule(req, nodes, now, key)
-                blocks = req.blocks[: self.warm_blocks]
-                warm = [nd for nd in nodes if _resident(nd, blocks)]
-                if warm:
-                    return _pick(warm, _load)   # least-loaded warm replica
+        if key is not None and self._active(key, now):
+            blocks = req.blocks[: self.prefix_blocks]
+            self._schedule(req, nodes, now, key, blocks)
+            warm = [nd for nd in nodes if _resident(nd, blocks)]
+            if warm:
+                return _pick(warm, _load)   # least-loaded warm replica
         return _cache_aware(req, nodes, self.cfg, now)
 
 

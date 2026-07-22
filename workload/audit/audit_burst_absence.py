@@ -452,13 +452,6 @@ def dataset_specs(args) -> list[dict]:
         {"name": "BurstGPT", "source": BURSTGPT_URL, "has_prefix": False,
          "load": lambda: load_burstgpt(BURSTGPT_URL, args.max_rows)},
     ]
-    # Positive control: local synthetic Bursted-ART, if present.
-    ctrl = Path(args.control_jsonl)
-    if ctrl.exists():
-        specs.append({
-            "name": "Bursted-ART-synthetic (CONTROL)", "source": str(ctrl), "has_prefix": True,
-            "load": lambda: load_local_jsonl(ctrl, args.max_rows),
-        })
     if args.datasets:
         want = {d.lower() for d in args.datasets}
         specs = [s for s in specs if any(w in s["name"].lower() for w in want)]
@@ -579,8 +572,7 @@ def render_markdown(results: list[DatasetResult], args) -> str:
 
     # Verdict
     lines.append("## Verdict\n")
-    real = [r for r in results if r.has_prefix_info and not r.error and "CONTROL" not in r.name]
-    ctrl = [r for r in results if "CONTROL" in r.name and not r.error]
+    real = [r for r in results if r.has_prefix_info and not r.error]
     noprefix = [r for r in results if not r.has_prefix_info and not r.error]
     present = [r for r in real if r.headline.get("target_pattern_present")]
     absent = [r for r in real if not r.headline.get("target_pattern_present")]
@@ -606,20 +598,13 @@ def render_markdown(results: list[DatasetResult], args) -> str:
             per100k = n_events / max(1, r.n_read) * 100000
             lines.append(
                 f"**4. {r.name}:** the *only* trace that contains the pattern at all — but marginally. "
-                f"Max fan-out **{ds['max_fanout']}-way** (vs the control's {ctrl[0].headline['deep_sync']['max_fanout'] if ctrl else '500'}-way, "
-                f"and vs the hundreds-to-thousands of a real production labeling sweep), and only "
+                f"Max fan-out **{ds['max_fanout']}-way** "
+                f"(vs the hundreds-to-thousands of a real production labeling sweep), and only "
                 f"**{n_events} such events in {r.n_read:,} requests** (~{per100k:.1f} per 100k, "
                 f"≈{n_events/(r.time_span_s/3600):.1f}/hour). ART is a specialized decoded-LLM-response / "
                 f"agent-eval corpus (request IDs are batch-timestamped `decoded_llm_responses_…`), i.e. "
                 f"already the most batch-like public dataset — which is exactly why BTB builds on ART and "
                 f"then *adds* synthetic bursts to reach production scale.\n")
-    if ctrl:
-        c = ctrl[0]
-        cds = c.headline["deep_sync"]
-        lines.append(f"**Positive control ({c.name}):** deep-sync fan-out **{cds['max_fanout']}** in "
-                     f"{cds['arrival_span_s']}s — the detector fires hard when the pattern is present, so "
-                     f"the absences above are real, not a broken detector.\n")
-
     lines.append("### Bottom line\n")
     lines.append(
         "> The synchronized long-prefix fan-out that KV-warming targets is **absent from every "

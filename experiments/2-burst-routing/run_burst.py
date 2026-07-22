@@ -48,23 +48,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def set_btb_knobs(cfg, warm_copies):
-    """BTB early_rdma parameters (see btb_policy). warm_blocks = the shared
-    family prefix; key = its first few blocks; a prefix warms once it is seen
-    >= THRESHOLD times in WINDOW."""
-    cfg.BTB_WARM_BLOCKS = PREFIX_BLOCKS
-    cfg.BTB_KEY_BLOCKS = 4
-    cfg.BTB_THRESHOLD = 4
-    cfg.BTB_WINDOW_S = 2.0
-    cfg.BTB_HORIZON_S = 120.0
-    cfg.BTB_WARM_COPIES = warm_copies
-
-
-def run_seeded(policy, requests, cfg):
-    """The sim's router breaks routing ties with the global RNG, which the sim
-    never seeds. Seed it here so results are reproducible and every policy sees
-    the same tie-break stream (a fair A/B)."""
-    random.seed(SEED)
-    return run(policy, requests, cfg)
+    """BTB early_rdma parameters (see btb_policy): the four core constants.
+    Y = PREFIX_BLOCKS (the shared family prefix, matched on and copied);
+    a prefix warms once it is seen >= X times in a Z-second window."""
+    cfg.BTB_PREFIX_BLOCKS = PREFIX_BLOCKS   # Y = the shared family prefix
+    cfg.BTB_THRESHOLD = 2                    # X (swept: insensitive, fire fast)
+    cfg.BTB_WINDOW_S = 1.0                   # Z (swept: insensitive)
+    cfg.BTB_WARM_COPIES = warm_copies        # M = the one real lever
 
 
 def run_seeded(policy, requests, cfg):

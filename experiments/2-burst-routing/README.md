@@ -43,7 +43,39 @@ recomputes instead. `RDMA_CONGESTION=False` is byte-identical to the old model.
 export INFERENCE_SIM_ROOT=/path/to/inference-sim   # optional; defaults to ../../../inference-sim
 python3 run_burst.py      # runs all three conditions + a cluster-size sweep
 python3 make_charts.py    # renders charts/*.png from results/burst_results.json
+python3 sweep_params.py   # sweeps the early_rdma constants X/Y/Z/M -> results/sweep_results.json
 ```
+
+## The early_rdma rule: four constants (X/Y/Z/M)
+
+`btb_policy.py` is the whole method — a fixed rule, no per-model learning:
+
+> if the same **Y**-block prefix arrives **X** times within **Z** seconds,
+> replicate its KV to the **M** least-busy replicas and route later same-prefix
+> requests across them.
+
+`sweep_params.py` grids these on a prefill-heavy single-hot-prefix regime (long
+shared prefix, 1-token output, 8 nodes) against a **realistic** baseline:
+`ADMIT_RDMA=False`, so a miss *recomputes* the prefix rather than opportunistically
+stealing a peer's KV — which is what SGLang actually does (there is no automatic
+peer-to-peer KV pull on the least-load / cache-aware path; cross-worker KV moves
+only via structured PD handoff or a shared pool). BTB's own warming push still
+runs at full RDMA bandwidth. What it found:
+
+- **Y — copy the *whole* shared prefix.** Every top-ranked config uses the full
+  prefix; warming a fraction always loses (the request still prefills the rest).
+  So Y is not a free dial — it is set to the workload's prefix length.
+- **X and Z barely matter.** Across X∈{2,4,8} and Z∈{1,2,4}s the result moves
+  <1%, so they are frozen as small constants (X=2, Z=1 s) rather than tuned.
+- **M is the one real lever** — more copies = more spread, bounded by node count
+  and warming cost.
+- **Result:** early_rdma cuts mean TTFT **~72% vs recompute-on-miss `least_load`**
+  and **~84% vs cache-sticky `cache_aware`** — pre-warming avoids the cold-node
+  prefill that both baselines otherwise eat. (Note: if the simulator is instead
+  allowed to hand the baseline a free peer-to-peer KV steal — `ADMIT_RDMA=True`,
+  which real SGLang does not do — that baseline gets warming's benefit for free
+  and BTB looks break-even; see finding 7 on why that regime flatters the
+  baseline.)
 
 ## What the charts show
 
@@ -59,7 +91,7 @@ isolated replicas is where cache_aware clearly wins (**~24%**, 93 vs 122 s).
 cluster sizes: **least_load vs cache_aware vs early_rdma (BTB)**. Congestion's
 effect grows with cluster size — cache_aware's TTFT advantage over least_load
 widens **3% → 8% → 20% → 35%** (4 → 8 → 16 → 32 nodes) as incast fan-in scales.
-**BTB tracks cache_aware but never beats it** (−2% / 2% / 15% / 34%): on tiny
+**BTB tracks cache_aware but never beats it** (−1% / 5% / 19% / 34%): on tiny
 clusters its warming overhead is a slight net loss; at scale it converges to
 cache_aware. See finding 7 for why.
 
@@ -83,8 +115,8 @@ touches cache_aware but slows the cache-blind policies.
    whether nodes can cheaply borrow each other's KV is.
 
 2. **cache_aware routes by prefix ~100% of the time — it does *not* fall back.**
-   (Measured: 0% fallback on this burst.) The imbalance guard (`IMBALANCE_ABS=8`,
-   `IMBALANCE_REL=1.5`) never trips, because cache_aware breaks prefix-match ties
+   (Measured: 0% fallback on this burst.) The imbalance guard (`IMBALANCE_ABS=64`,
+   `IMBALANCE_REL=1.5`, the SGLang router defaults) never trips, because cache_aware breaks prefix-match ties
    by load and so stays balanced on its own. It genuinely earns **2× the free
    local-HBM hits** of least_load (68% vs 37%, `cache_tier.png`).
 
@@ -118,7 +150,7 @@ touches cache_aware but slows the cache-blind policies.
    the sim in `btb_policy.py`) detects a sustained shared-prefix burst, RDMA-copies
    the prefix onto the least-busy replicas ahead of demand, and routes active-prefix
    requests to the least-loaded warm replica. Under the congested/scaling sweep it
-   tracks cache_aware (−2% / 2% / 15% / 34% vs least_load at 4/8/16/32 nodes) but
+   tracks cache_aware (−1% / 5% / 19% / 34% vs least_load at 4/8/16/32 nodes) but
    never overtakes it. Why: the simulator warms a node whenever it *serves* a
    request (`node.insert`), so a hot prefix naturally replicates across every node
    that touches it, and cache_aware balances across those replicas for free. BTB's
