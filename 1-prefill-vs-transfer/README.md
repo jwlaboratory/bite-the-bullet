@@ -14,8 +14,7 @@ any prompt length and is the entire budget the bite-the-bullet warming policy is
 spending when it fills a cheaper tier instead of prefilling again.
 
 Every number is derived from the real simulator constants
-(`../../../inference-sim/config.py`, `gpu.py`) via the same `sim_path` shim the
-other experiments use — nothing is hardcoded.
+(`../../inference-sim/config.py`, `gpu.py`) via the `sim_path` shim — nothing is hardcoded.
 
 ## The standard setup (per node)
 
@@ -77,11 +76,11 @@ these sizes but dominant for a single-token move.
 
 ```bash
 # numbers + results.json (needs the sibling inference-sim checkout)
-python experiments/1-prefill-vs-transfer/compute_costs.py
+python 1-prefill-vs-transfer/compute_costs.py
 
 # re-render the PNGs from the HTML (headless Chrome, no deps)
 CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-cd experiments/1-prefill-vs-transfer
+cd 1-prefill-vs-transfer
 "$CHROME" --headless --disable-gpu --hide-scrollbars --force-device-scale-factor=3 \
   --default-background-color=FFFFFFFF --window-size=952,520 \
   --screenshot=figures/prefill-vs-transfer-chart.png "file://$PWD/chart.html"

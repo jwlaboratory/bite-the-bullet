@@ -1,0 +1,22 @@
+{
+  "constants": {
+    "X": 2,
+    "Y": 128,
+    "Z": 1.0,
+    "M": 4
+  },
+  "workload": {
+    "prefix_tokens": 32768,
+    "output_tokens": 1,
+    "burst_size": 400,
+    "burst_window_s": 8.0,
+    "nodes": 8
+  },
+  "mean_ttft": {
+    "least_load": 0.10259599548847351,
+    "cache_aware": 0.17641524533011607,
+    "early_rdma": 0.029857399399775376
+  },
+  "best_baseline": "least_load",
+  "improvement_pct": 70.89808500066671
+}

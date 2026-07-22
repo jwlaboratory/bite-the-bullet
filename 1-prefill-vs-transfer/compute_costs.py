@@ -12,17 +12,17 @@ Both are linear in N, so the prefill/transfer ratio is constant and is the
 whole argument for warming from a cheaper tier instead of prefilling again.
 
 Every number comes from the real sim constants (inference-sim/config.py, gpu.py)
-via the same sim_path shim the other experiments use — nothing is hardcoded here.
-Run it to regenerate results.json and print the table.
+via the sim_path shim — nothing is hardcoded here. Run it to regenerate
+results.json and print the table.
 
-    python experiments/prefill-vs-transfer/compute_costs.py
+    python 1-prefill-vs-transfer/compute_costs.py
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 import sys
 sys.path.insert(0, str(ROOT))
 from sim_path import add_inference_sim_to_path

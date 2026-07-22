@@ -119,7 +119,7 @@ fig.text(0.5, 0.055,
          ha="center", fontsize=9, color=INK)
 fig.text(0.5, 0.015,
          "Public traces vs. a synthetic data-labeling workload. Contiguous 300k-row slices "
-         "(Mooncake read in full). Source: dataset-audit/results/burst_audit.json",
+         "(Mooncake read in full). Source: results/burst_audit.json",
          ha="center", fontsize=8.4, color=INK2)
 
 out_png = HERE / "results" / "burst_audit_chart.png"

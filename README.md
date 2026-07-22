@@ -1,45 +1,23 @@
 # Bite the Bullet
 
-Detect sustained shared-prefix reuse, then RDMA-copy existing KV into HBM on
-less-busy replicas *before* later requests arrive — while the fabric is still
-quiet — instead of recomputing the prefix or contending for it reactively during
-the spike. The active policy is `early_rdma`.
+Detect a sustained shared-prefix burst, then RDMA-copy its KV onto less-busy
+replicas **before** later requests arrive — so those requests land on a warm
+node instead of recomputing the prefix. The policy is `early_rdma`.
 
+The repo is three folders:
 
-1. workload/audit: does workload even exist in public traces
-2. workload/generate: synthetic generate the bursted-art dataset
-3. experiments/1-prefill-vs-transfer: moving kv beats recomputing
-4. experiments/2-burst-routing: 
-5. experiments/3-early-rdma: 
+| # | Folder | What |
+|---|--------|------|
+| 1 | [`1-prefill-vs-transfer/`](1-prefill-vs-transfer/) | **The motivation.** Recomputing a prefix vs transferring its KV from HBM / RAM / RDMA / disk. Prefill costs ~44× an RDMA transfer — that gap is what warming spends. |
+| 2 | [`2-bite-the-bullet/`](2-bite-the-bullet/) | **The algorithm + its result.** One file with the four-constant `early_rdma` rule and a runnable head-to-head. It cuts mean TTFT ~71% vs the best baseline. |
+| 3 | [`3-workload/`](3-workload/) | **The workload.** `generate/` builds the Bursted-ART burst dataset; `audit/` checks whether the pattern shows up in public traces (mostly it doesn't). |
 
-
-# Dependency
-
-Every live experiment runs on a sibling `inference-sim` checkout:
-
-```text
-../inference-sim
-```
-
-Override with:
+Everything runs on the [Infer-Sim](https://jwlabs.vercel.app/post/infer-sim)
+engine — clone `inference-sim` next to this repo, or set `INFERENCE_SIM_ROOT`.
 
 ```bash
-export INFERENCE_SIM_ROOT=/path/to/inference-sim
+python3 1-prefill-vs-transfer/compute_costs.py     # the cost gap
+python3 2-bite-the-bullet/bite_the_bullet.py       # the algorithm + result
 ```
 
-Live experiment scripts assume they sit exactly two directories deep
-(`experiments/<name>/script.py`) and that `sim_path.py` stays at the repo
-root — keep that shape when adding experiments.
-
-
-
-# Future ideas
-
-1. cost aware gate: trigger only when reuse beats movement cost and tail risks
-2. better network model for fabric congestion
-3. test on real serving stack
-4. partial-prefix warming;
-5. fake-prefill warming;
-6. seed-real warming;
-7. learned router / online router;
-8. dynamic re-sharding.
+Superseded material is under [`archive/`](archive/).

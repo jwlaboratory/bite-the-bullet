@@ -626,9 +626,9 @@ def parse_args() -> argparse.Namespace:
                    help="max contiguous rows to read per trace (default 300000)")
     p.add_argument("--datasets", nargs="*", default=None,
                    help="substring filter, e.g. --datasets mooncake art control")
-    p.add_argument("--control-jsonl", default="workload/generate/out/Bursted-ART/test.jsonl",
+    p.add_argument("--control-jsonl", default="3-workload/generate/out/Bursted-ART/test.jsonl",
                    help="local synthetic positive-control jsonl")
-    p.add_argument("--out-dir", type=Path, default=Path("dataset-audit/results"))
+    p.add_argument("--out-dir", type=Path, default=Path("3-workload/audit/results"))
     return p.parse_args()
 
 
