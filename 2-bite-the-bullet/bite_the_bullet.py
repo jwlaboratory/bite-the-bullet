@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bite The Bullet (early_rdma) — the routing algorithm and a runnable demo.
+"""Bite the Bullet (early_rdma): the algorithm, replayed on Bursted-ART.
 
 THE ALGORITHM — four constants, no per-model learning:
 
@@ -8,30 +8,28 @@ THE ALGORITHM — four constants, no per-model learning:
     warm copy.
 
     X = THRESHOLD      repeats needed to fire        (2)
-    Y = PREFIX_BLOCKS  shared prefix, matched + copied (the whole prefix)
+    Y = PREFIX_BLOCKS  shared prefix, matched + copied (256 blocks = the Bursted-ART burst prefix)
     Z = WINDOW_S       detection window in seconds     (1)
     M = WARM_COPIES    HBM copies to warm              (4)
 
-A prefix a node does not hold is recomputed, so warming a replica before its
-first same-prefix request lands saves that recompute. This file contains the
-algorithm and a single head-to-head run: least_load and cache_aware (neither
-pre-warms) vs early_rdma, on a prefill-heavy shared-prefix burst.
+This replays the real Bursted-ART test set (3-workload/generate/out/Bursted-ART),
+window by window, across several model x hardware setups. For each setup it runs
+cache_aware (the SGLang default router, no warming) and early_rdma (cache_aware +
+warming), and reports how much early_rdma cuts mean TTFT on the bursty
+(synthetic) windows and on the full mixed set.
 
-RUN (clone inference-sim next to this repo, then):
+RUN (clone inference-sim next to this repo, and generate/download the dataset
+     into 3-workload/generate/out/Bursted-ART first):
 
     python3 2-bite-the-bullet/bite_the_bullet.py
-
-or point at the simulator explicitly:
-
-    INFERENCE_SIM_ROOT=/path/to/inference-sim python3 2-bite-the-bullet/bite_the_bullet.py
 """
 from __future__ import annotations
 
 import json
-import os
-import random
 import math
+import random
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -46,6 +44,12 @@ from workload import Request        # noqa: E402
 import router                       # noqa: E402
 
 HERE = Path(__file__).resolve().parent
+DATA = ROOT / "3-workload" / "generate" / "out" / "Bursted-ART" / "test.jsonl"
+
+# The four constants, hard-coded.
+X_THRESHOLD, Y_PREFIX_BLOCKS, Z_WINDOW_S, M_WARM_COPIES = 2, 256, 1.0, 4
+BLOCK = 256
+SEED = 42
 
 
 # ============================ THE ALGORITHM ============================ #
@@ -66,8 +70,6 @@ def _pick(nodes, key):
 
 
 def _cache_aware(req, nodes, cfg):
-    """Route to the longest local prefix match, then lightest load; fall back to
-    least-load when the cluster gets skewed (SGLang imbalance thresholds)."""
     loads = [_load(nd) for nd in nodes]
     if max(loads) > cfg.IMBALANCE_ABS and max(loads) > cfg.IMBALANCE_REL * min(loads):
         return _pick(nodes, lambda nd: _load(nd))
@@ -82,20 +84,19 @@ class _PendingWarm:
 
 
 class EarlyRdma:
-    """The four-constant rule (X/Y/Z/M). A prefix is active while its trailing
+    """The four-constant rule (X/Y/Z/M): a prefix is active while its trailing
     Z-second count is >= X; while active it warms up to M copies and routes to
     the least-loaded warm replica, else falls back to cache_aware."""
 
     def __init__(self, cfg):
         self.cfg = cfg
-        self.prefix_blocks = int(getattr(cfg, "BTB_PREFIX_BLOCKS", 128))  # Y
+        self.prefix_blocks = int(getattr(cfg, "BTB_PREFIX_BLOCKS", 256))  # Y
         self.threshold = int(getattr(cfg, "BTB_THRESHOLD", 2))            # X
         self.window = float(getattr(cfg, "BTB_WINDOW_S", 1.0))            # Z
         self.copies = int(getattr(cfg, "BTB_WARM_COPIES", 4))            # M
         self.hist = {}
         self.pending = []
         self.planned = set()
-        self.stats = {"warm_count": 0, "warm_bytes": 0.0, "warm_busy_s": 0.0}
 
     def _key(self, req):
         k = tuple(req.blocks[: self.prefix_blocks])
@@ -138,9 +139,6 @@ class EarlyRdma:
             nd.busy += dur
             self.pending.append(_PendingWarm(start + dur, nd, blocks, key))
             self.planned.add((key, nd.name))
-            self.stats["warm_count"] += 1
-            self.stats["warm_bytes"] += nbytes
-            self.stats["warm_busy_s"] += dur
 
     def route(self, req, nodes, now):
         self._apply_ready(now)
@@ -158,93 +156,119 @@ def register():
     router.POLICIES["early_rdma"] = EarlyRdma
 
 
-# ============================ THE DEMO ============================ #
-BLOCK = 256                 # tokens/block (must match cfg.BLOCK_TOKENS)
-PREFIX_BLOCKS = 128         # shared prefix: 128 * 256 = 32,768 tokens (prefill-heavy)
-OUTPUT_TOKENS = 1           # decode-negligible -> prefill dominates TTFT
-BURST_SIZE = 400            # requests sharing the hot prefix
-BURST_WINDOW = 8.0          # arrive over 8 s
-NODES = 8
-SEED = 42
+# ============================ MODEL x HARDWARE SETUPS ============================ #
+MODEL_PRESETS = {
+    "70b":      {"PARAMS": 70.6e9, "ACTIVE_PARAMS": 70.6e9, "DTYPE_BYTES": 2.0, "LAYERS": 80, "KV_HEADS": 8, "HEAD_DIM": 128},
+    "glm45":    {"PARAMS": 355e9,  "ACTIVE_PARAMS": 32e9,   "DTYPE_BYTES": 0.5, "LAYERS": 92, "KV_HEADS": 4, "HEAD_DIM": 128},
+    "glm52":    {"PARAMS": 744e9,  "ACTIVE_PARAMS": 40e9,   "DTYPE_BYTES": 0.5, "LAYERS": 78, "KV_HEADS": 1, "HEAD_DIM": 288},
+    "qwen3-8b": {"PARAMS": 8.19e9, "ACTIVE_PARAMS": 8.19e9, "DTYPE_BYTES": 2.0, "LAYERS": 36, "KV_HEADS": 8, "HEAD_DIM": 128},
+    "kimi-k2":  {"PARAMS": 1e12,   "ACTIVE_PARAMS": 32e9,   "DTYPE_BYTES": 0.5, "LAYERS": 61, "KV_HEADS": 8, "HEAD_DIM": 128},
+    "dense1t":  {"PARAMS": 1e12,   "ACTIVE_PARAMS": 1e12,   "DTYPE_BYTES": 1.0, "LAYERS": 120, "KV_HEADS": 8, "HEAD_DIM": 128},
+}
 
-# The four constants, hard-coded.
-X_THRESHOLD, Y_PREFIX_BLOCKS, Z_WINDOW_S, M_WARM_COPIES = 2, PREFIX_BLOCKS, 1.0, 4
-
-
-def make_workload():
-    rng = random.Random(SEED)
-    prefix = [f"sys#{b}" for b in range(PREFIX_BLOCKS)]
-    reqs = []
-
-    def add(arrival, uid):
-        blocks = prefix + [f"u{uid}#0"]
-        inp = len(blocks) * BLOCK
-        extra = math.ceil((inp + OUTPUT_TOKENS) / BLOCK) - len(blocks)
-        cache_blocks = blocks + [f"u{uid}#o{j}" for j in range(max(0, extra))]
-        reqs.append(Request(0, arrival, "hot", inp, inp, OUTPUT_TOKENS, blocks, cache_blocks))
-
-    add(0.0, 0)                       # seed a source HBM copy
-    add(1.0, 1)
-    for i in range(BURST_SIZE):
-        add(4.0 + rng.uniform(0.0, BURST_WINDOW), 100 + i)
-
-    reqs.sort(key=lambda r: r.arrival)
-    for i, r in enumerate(reqs):
-        r.id = i
-    return reqs
+# (label, preset, GPU, gpus_per_replica, num_replicas)
+SETUPS = [
+    ("70b_h100x4",    "70b",      "H100", 4, 4),
+    ("qwen3_8b_h100x4", "qwen3-8b", "H100", 4, 4),
+    ("glm45_h100x4",  "glm45",    "H100", 4, 4),
+    ("glm52_h100x8",  "glm52",    "H100", 8, 4),
+    ("kimi_k2_h100x8", "kimi-k2", "H100", 8, 4),
+    ("dense1t_b300x4", "dense1t", "B300", 4, 4),
+]
 
 
-def base_cfg():
+def setup_cfg(preset, gpu, gpr, nrep):
     cfg = SimpleNamespace(**config.as_dict())
     cfg.BLOCK_TOKENS = BLOCK
-    cfg.DISK_CACHE = False            # a prefix a node lacks is recomputed
-    spec, gpus = cfg.CLUSTER[0][1], cfg.CLUSTER[0][2]
-    cfg.CLUSTER = [(f"node{i}", spec, gpus) for i in range(NODES)]
-    cfg.BTB_THRESHOLD = X_THRESHOLD
+    cfg.DISK_CACHE = False                     # a prefix a node lacks is recomputed
+    for k, v in MODEL_PRESETS[preset].items():
+        setattr(cfg, k, v)
     cfg.BTB_PREFIX_BLOCKS = Y_PREFIX_BLOCKS
+    cfg.BTB_THRESHOLD = X_THRESHOLD
     cfg.BTB_WINDOW_S = Z_WINDOW_S
     cfg.BTB_WARM_COPIES = M_WARM_COPIES
+    spec = getattr(config, gpu)
+    cfg.CLUSTER = [(f"node{i}", spec, gpr) for i in range(nrep)]
     return cfg
 
 
-def run_seeded(policy, reqs, cfg):
-    random.seed(SEED)
-    return run(policy, reqs, cfg)["metrics"]
+# ============================ DATASET REPLAY ============================ #
+def load_windows():
+    """Group Bursted-ART rows by trace window; build sim Requests per window.
+    Returns [(source, requests), ...] where source is 'art' or 'synthetic'."""
+    by_win = {}
+    with open(DATA) as f:
+        for line in f:
+            r = json.loads(line)
+            by_win.setdefault(r["trace_id"], []).append(r)
+    windows = []
+    for tid, rows in by_win.items():
+        rows.sort(key=lambda r: r.get("arrival_s", 0.0))
+        reqs = []
+        for i, r in enumerate(rows):
+            blocks = [str(x) for x in (r.get("hash_ids") or [])]
+            inp = max(1, int(r.get("input_length") or 1))
+            out = max(1, int(r.get("output_length") or 1))
+            extra = math.ceil((inp + out) / BLOCK) - len(blocks)
+            cache_blocks = blocks + [f"{tid}:{i}#o{j}" for j in range(max(0, extra))]
+            reqs.append(Request(
+                id=i, arrival=float(r.get("arrival_s", 0.0)), group=tid,
+                prefix_tokens=min(len(blocks) * BLOCK, inp),
+                input_tokens=inp, output_tokens=out,
+                blocks=blocks, cache_blocks=cache_blocks))
+        windows.append((rows[0]["source"], reqs))
+    return windows
+
+
+def replay_mean_ttft(policy, windows, cfg):
+    """Run every window under `policy`; return request-weighted mean TTFT for the
+    synthetic windows and for the full (mixed) set."""
+    syn_sum = syn_n = mix_sum = mix_n = 0.0
+    for source, reqs in windows:
+        random.seed(SEED)
+        m = run(policy, reqs, cfg)["metrics"]
+        s, n = m["mean_ttft"] * len(reqs), len(reqs)
+        mix_sum += s; mix_n += n
+        if source == "synthetic":
+            syn_sum += s; syn_n += n
+    return (syn_sum / syn_n if syn_n else 0.0), (mix_sum / mix_n if mix_n else 0.0)
 
 
 def main():
+    if not DATA.exists():
+        sys.exit(f"dataset not found: {DATA}\n"
+                 f"generate it: python3 3-workload/generate/generate_combined_dataset.py "
+                 f"--synthetic-burst-window-s 60 --out-dir 3-workload/generate/out/Bursted-ART")
     register()
-    reqs = make_workload()
-    print(f"workload: {len(reqs)} reqs, {PREFIX_BLOCKS * BLOCK}-tok shared prefix, "
-          f"{OUTPUT_TOKENS}-tok output, burst over {BURST_WINDOW}s, {NODES} nodes")
-    print(f"algorithm constants: X={X_THRESHOLD} Y={Y_PREFIX_BLOCKS} "
-          f"Z={Z_WINDOW_S:.0f}s M={M_WARM_COPIES}\n")
+    windows = load_windows()
+    n_syn = sum(1 for s, _ in windows if s == "synthetic")
+    print(f"Bursted-ART test set: {len(windows)} windows ({n_syn} synthetic, "
+          f"{len(windows) - n_syn} ART), {sum(len(r) for _, r in windows):,} requests")
+    print(f"algorithm: X={X_THRESHOLD} Y={Y_PREFIX_BLOCKS} Z={Z_WINDOW_S:.0f}s M={M_WARM_COPIES}\n")
 
-    ll = run_seeded("least_load", reqs, base_cfg())
-    ca = run_seeded("cache_aware", reqs, base_cfg())
-    btb = run_seeded("early_rdma", reqs, base_cfg())
+    print(f"{'setup':<18}{'model':<9}{'hw':<9}{'synthetic':>11}{'mixed':>9}")
+    print("-" * 56)
+    rows = []
+    for label, preset, gpu, gpr, nrep in SETUPS:
+        cfg = setup_cfg(preset, gpu, gpr, nrep)
+        try:
+            ca_syn, ca_mix = replay_mean_ttft("cache_aware", windows, cfg)
+            bt_syn, bt_mix = replay_mean_ttft("early_rdma", windows, cfg)
+        except Exception as e:
+            print(f"{label:<18}{preset:<9}{gpu+'x'+str(gpr):<9}  skipped ({type(e).__name__})")
+            continue
+        syn = (ca_syn - bt_syn) / ca_syn * 100 if ca_syn else 0.0
+        mix = (ca_mix - bt_mix) / ca_mix * 100 if ca_mix else 0.0
+        print(f"{label:<18}{preset:<9}{gpu+'x'+str(gpr):<9}{syn:>+10.1f}%{mix:>+8.1f}%")
+        rows.append({"setup": label, "model": preset, "gpu": gpu, "gpus_per_replica": gpr,
+                     "num_replicas": nrep, "synthetic_improvement_pct": syn, "mixed_improvement_pct": mix,
+                     "cache_aware_mean_ttft_synthetic": ca_syn, "early_rdma_mean_ttft_synthetic": bt_syn})
+    print("\n(positive = early_rdma lower mean TTFT than cache_aware, the SGLang default router)")
 
-    base = min(ll["mean_ttft"], ca["mean_ttft"])
-    base_name = "least_load" if ll["mean_ttft"] <= ca["mean_ttft"] else "cache_aware"
-    impr = (base - btb["mean_ttft"]) / base * 100.0
-
-    print(f"{'policy':<14}{'mean_ttft':>12}")
-    for name, m in (("least_load", ll), ("cache_aware", ca), ("early_rdma", btb)):
-        print(f"{name:<14}{m['mean_ttft']:>11.3f}s")
-    print(f"\nearly_rdma cuts mean TTFT {impr:+.1f}% vs the best baseline "
-          f"({base_name} {base:.3f}s -> {btb['mean_ttft']:.3f}s)")
-
-    out = {
-        "constants": {"X": X_THRESHOLD, "Y": Y_PREFIX_BLOCKS, "Z": Z_WINDOW_S, "M": M_WARM_COPIES},
-        "workload": {"prefix_tokens": PREFIX_BLOCKS * BLOCK, "output_tokens": OUTPUT_TOKENS,
-                     "burst_size": BURST_SIZE, "burst_window_s": BURST_WINDOW, "nodes": NODES},
-        "mean_ttft": {"least_load": ll["mean_ttft"], "cache_aware": ca["mean_ttft"],
-                      "early_rdma": btb["mean_ttft"]},
-        "best_baseline": base_name,
-        "improvement_pct": impr,
-    }
+    out = {"constants": {"X": X_THRESHOLD, "Y": Y_PREFIX_BLOCKS, "Z": Z_WINDOW_S, "M": M_WARM_COPIES},
+           "dataset": "Bursted-ART/test.jsonl", "baseline": "cache_aware (no warming)", "setups": rows}
     (HERE / "results.json").write_text(json.dumps(out, indent=2) + "\n")
-    print("\nwrote results.json")
+    print("wrote results.json")
     return out
 
 

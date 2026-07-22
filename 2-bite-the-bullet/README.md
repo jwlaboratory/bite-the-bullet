@@ -32,16 +32,28 @@ python3 2-bite-the-bullet/bite_the_bullet.py
 INFERENCE_SIM_ROOT=/path/to/inference-sim python3 2-bite-the-bullet/bite_the_bullet.py
 ```
 
+## What it runs on
+
+It **replays the real Bursted-ART test set**
+([`../3-workload/generate/`](../3-workload/generate/)) — all 30 windows /
+76,800 requests — window by window, across six model×hardware setups. Generate
+or download the dataset first (see folder 3).
+
 ## Result
 
-On a prefill-heavy shared-prefix burst (32,768-token prefix, 1-token output,
-400 requests over 8 s, 8 nodes):
+early_rdma vs `cache_aware` (the SGLang default router, no warming), mean-TTFT
+reduction on Bursted-ART:
 
-| policy | mean TTFT |
-|--------|----------:|
-| cache_aware | 0.176 s |
-| least_load  | 0.103 s |
-| **early_rdma** | **0.030 s** |
+| setup | model | hw | synthetic | mixed |
+|---|---|---|--:|--:|
+| 70b_h100x4 | Llama-70B | H100×4 | +62.0% | +54.0% |
+| qwen3_8b_h100x4 | Qwen3-8B | H100×4 | +41.9% | +33.3% |
+| glm45_h100x4 | GLM-4.5 | H100×4 | +70.3% | +60.0% |
+| glm52_h100x8 | GLM-4.6 | H100×8 | +64.0% | +53.5% |
+| kimi_k2_h100x8 | Kimi K2 | H100×8 | +58.5% | +48.1% |
+| dense1t_b300x4 | dense-1T | B300×4 | +11.0% | +10.3% |
 
-**early_rdma cuts mean TTFT ~71% vs the best baseline.** Raw numbers in
+**synthetic** = the bursty windows the mechanism targets; **mixed** = the full
+test set including real ART traffic (where early_rdma stays inert, so the gain
+dilutes but stays large). Positive = lower TTFT. Raw numbers in
 [`results.json`](results.json).

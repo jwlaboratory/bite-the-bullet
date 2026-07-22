@@ -1,22 +1,78 @@
 {
   "constants": {
     "X": 2,
-    "Y": 128,
+    "Y": 256,
     "Z": 1.0,
     "M": 4
   },
-  "workload": {
-    "prefix_tokens": 32768,
-    "output_tokens": 1,
-    "burst_size": 400,
-    "burst_window_s": 8.0,
-    "nodes": 8
-  },
-  "mean_ttft": {
-    "least_load": 0.10259599548847351,
-    "cache_aware": 0.17641524533011607,
-    "early_rdma": 0.029857399399775376
-  },
-  "best_baseline": "least_load",
-  "improvement_pct": 70.89808500066671
+  "dataset": "Bursted-ART/test.jsonl",
+  "baseline": "cache_aware (no warming)",
+  "setups": [
+    {
+      "setup": "70b_h100x4",
+      "model": "70b",
+      "gpu": "H100",
+      "gpus_per_replica": 4,
+      "num_replicas": 4,
+      "synthetic_improvement_pct": 62.02532521555003,
+      "mixed_improvement_pct": 53.96313584847611,
+      "cache_aware_mean_ttft_synthetic": 1.481303844912897,
+      "early_rdma_mean_ttft_synthetic": 0.5625203176752257
+    },
+    {
+      "setup": "qwen3_8b_h100x4",
+      "model": "qwen3-8b",
+      "gpu": "H100",
+      "gpus_per_replica": 4,
+      "num_replicas": 4,
+      "synthetic_improvement_pct": 41.86636338625573,
+      "mixed_improvement_pct": 33.255168009402865,
+      "cache_aware_mean_ttft_synthetic": 0.03414670256998245,
+      "early_rdma_mean_ttft_synthetic": 0.019850719987609674
+    },
+    {
+      "setup": "glm45_h100x4",
+      "model": "glm45",
+      "gpu": "H100",
+      "gpus_per_replica": 4,
+      "num_replicas": 4,
+      "synthetic_improvement_pct": 70.32133376264854,
+      "mixed_improvement_pct": 59.954865829349245,
+      "cache_aware_mean_ttft_synthetic": 0.3049037743607447,
+      "early_rdma_mean_ttft_synthetic": 0.09049137353761263
+    },
+    {
+      "setup": "glm52_h100x8",
+      "model": "glm52",
+      "gpu": "H100",
+      "gpus_per_replica": 8,
+      "num_replicas": 4,
+      "synthetic_improvement_pct": 63.972108036578454,
+      "mixed_improvement_pct": 53.46311278382709,
+      "cache_aware_mean_ttft_synthetic": 0.1390896067852931,
+      "early_rdma_mean_ttft_synthetic": 0.05011105326495324
+    },
+    {
+      "setup": "kimi_k2_h100x8",
+      "model": "kimi-k2",
+      "gpu": "H100",
+      "gpus_per_replica": 8,
+      "num_replicas": 4,
+      "synthetic_improvement_pct": 58.48223453103311,
+      "mixed_improvement_pct": 48.0652683367701,
+      "cache_aware_mean_ttft_synthetic": 0.09496383002748145,
+      "early_rdma_mean_ttft_synthetic": 0.03942686023115811
+    },
+    {
+      "setup": "dense1t_b300x4",
+      "model": "dense1t",
+      "gpu": "B300",
+      "gpus_per_replica": 4,
+      "num_replicas": 4,
+      "synthetic_improvement_pct": 10.98570391976966,
+      "mixed_improvement_pct": 10.25727810112711,
+      "cache_aware_mean_ttft_synthetic": 493.05556311559434,
+      "early_rdma_mean_ttft_synthetic": 438.8899387917621
+    }
+  ]
 }
