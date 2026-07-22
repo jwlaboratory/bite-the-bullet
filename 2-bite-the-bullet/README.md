@@ -39,26 +39,40 @@ INFERENCE_SIM_ROOT=/path/to/inference-sim python3 2-bite-the-bullet/bite_the_bul
 
 ## What it runs on
 
-It **replays the real Bursted-ART test set**
-([`../3-workload/generate/`](../3-workload/generate/)) — all 30 windows /
-76,800 requests — window by window, across six model×hardware setups. Generate
-or download the dataset first (see folder 3).
+It **replays two datasets as real traces**, window by window, across six
+model×hardware setups ([`../3-workload/generate/`](../3-workload/generate/) —
+generate or download first):
 
-## Result
+- **Bursted-ART** — the full test set (real ART traffic + synchronized bursts).
+- **normal-ART** — the plain-ART windows only, no bursts (a control: BTB should
+  be inert).
 
-early_rdma vs `cache_aware` (the SGLang default router, no warming), mean-TTFT
-reduction on Bursted-ART:
+TTFT is pooled over all requests; both **mean** and **p95** are reported.
 
-| setup | model | hw | synthetic | mixed |
-|---|---|---|--:|--:|
-| 70b_h100x4 | Llama-70B | H100×4 | +62.0% | +54.0% |
-| qwen3_8b_h100x4 | Qwen3-8B | H100×4 | +41.9% | +33.3% |
-| glm45_h100x4 | GLM-4.5 | H100×4 | +70.3% | +60.0% |
-| glm52_h100x8 | GLM-4.6 | H100×8 | +64.0% | +53.5% |
-| kimi_k2_h100x8 | Kimi K2 | H100×8 | +58.5% | +48.1% |
-| dense1t_b300x4 | dense-1T | B300×4 | +11.0% | +10.3% |
+## Result — Bursted-ART
 
-**synthetic** = the bursty windows the mechanism targets; **mixed** = the full
-test set including real ART traffic (where early_rdma stays inert, so the gain
-dilutes but stays large). Positive = lower TTFT. Raw numbers in
-[`results.json`](results.json).
+early_rdma vs `cache_aware` (SGLang default router, no warming):
+
+| setup | CA mean | CA p95 | BTB mean | BTB p95 | mean speedup | p95 speedup |
+|---|--:|--:|--:|--:|--:|--:|
+| 70b_h100x4 | 1.373s | 4.697s | 0.632s | 4.697s | **+54.0%** | +0.0% |
+| qwen3_8b_h100x4 | 0.034s | 0.325s | 0.023s | 0.059s | **+33.3%** | +81.8% |
+| glm45_h100x4 | 0.288s | 1.905s | 0.115s | 0.780s | **+60.0%** | +59.0% |
+| glm52_h100x8 | 0.134s | 1.101s | 0.062s | 0.243s | **+53.5%** | +78.0% |
+| kimi_k2_h100x8 | 0.093s | 0.832s | 0.048s | 0.167s | **+48.1%** | +79.9% |
+| dense1t_b300x4 | 436.8s | 926.1s | 392.0s | 857.9s | **+10.3%** | +7.4% |
+
+## Result — normal-ART (control)
+
+| setup | CA mean | BTB mean | mean speedup | p95 speedup |
+|---|--:|--:|--:|--:|
+| 70b_h100x4 | 0.927s | 0.919s | +0.9% | +1.3% |
+| qwen3_8b_h100x4 | 0.036s | 0.036s | −0.5% | −0.2% |
+| glm45_h100x4 | 0.220s | 0.218s | +0.6% | +1.5% |
+| glm52_h100x8 | 0.111s | 0.112s | −0.6% | +1.0% |
+| kimi_k2_h100x8 | 0.084s | 0.084s | −0.4% | −0.4% |
+| dense1t_b300x4 | 204.8s | 198.6s | +3.0% | +2.9% |
+
+On plain ART the prefix never repeats deeply enough to fire, so early_rdma ≈
+cache_aware — it neither helps nor hurts ordinary traffic. Positive = lower TTFT.
+Raw numbers + field definitions in [`results.json`](results.json).

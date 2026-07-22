@@ -220,18 +220,23 @@ def load_windows():
     return windows
 
 
-def replay_mean_ttft(policy, windows, cfg):
-    """Run every window under `policy`; return request-weighted mean TTFT for the
-    synthetic windows and for the full (mixed) set."""
-    syn_sum = syn_n = mix_sum = mix_n = 0.0
+def replay(policy, windows, cfg):
+    """Run every window under `policy`; pool per-request TTFTs into two datasets:
+    'Bursted-ART' (every window) and 'normal-ART' (the plain-ART windows only)."""
+    pools = {"Bursted-ART": [], "normal-ART": []}
     for source, reqs in windows:
         random.seed(SEED)
-        m = run(policy, reqs, cfg)["metrics"]
-        s, n = m["mean_ttft"] * len(reqs), len(reqs)
-        mix_sum += s; mix_n += n
-        if source == "synthetic":
-            syn_sum += s; syn_n += n
-    return (syn_sum / syn_n if syn_n else 0.0), (mix_sum / mix_n if mix_n else 0.0)
+        ev = run(policy, reqs, cfg)["events"]
+        ttfts = [e["start"] - e["arrival"] + e["reuse"] + e["prefill"] for e in ev]
+        pools["Bursted-ART"].extend(ttfts)
+        if source == "art":
+            pools["normal-ART"].extend(ttfts)
+    return pools
+
+
+def mean_p95(ttfts):
+    s = sorted(ttfts)
+    return sum(s) / len(s), s[int(0.95 * len(s))]
 
 
 def main():
@@ -241,29 +246,38 @@ def main():
                  f"--synthetic-burst-window-s 60 --out-dir 3-workload/generate/out/Bursted-ART")
     register()
     windows = load_windows()
-    n_syn = sum(1 for s, _ in windows if s == "synthetic")
-    print(f"Bursted-ART test set: {len(windows)} windows ({n_syn} synthetic, "
-          f"{len(windows) - n_syn} ART), {sum(len(r) for _, r in windows):,} requests")
+    n_art = sum(1 for s, _ in windows if s == "art")
+    print(f"test set: {len(windows)} windows ({len(windows) - n_art} bursty, {n_art} plain ART), "
+          f"{sum(len(r) for _, r in windows):,} requests")
     print(f"algorithm: X={X_THRESHOLD} Y={Y_PREFIX_BLOCKS} Z={Z_WINDOW_S:.0f}s M={M_WARM_COPIES}\n")
 
-    print(f"{'setup':<18}{'model':<9}{'hw':<9}{'synthetic':>11}{'mixed':>9}")
-    print("-" * 56)
-    rows = []
+    DATASETS = ["Bursted-ART", "normal-ART"]
+    results = {ds: [] for ds in DATASETS}
+    ca_pools, bt_pools = {}, {}
     for label, preset, gpu, gpr, nrep in SETUPS:
         cfg = setup_cfg(preset, gpu, gpr, nrep)
-        try:
-            ca_syn, ca_mix = replay_mean_ttft("cache_aware", windows, cfg)
-            bt_syn, bt_mix = replay_mean_ttft("early_rdma", windows, cfg)
-        except Exception as e:
-            print(f"{label:<18}{preset:<9}{gpu+'x'+str(gpr):<9}  skipped ({type(e).__name__})")
-            continue
-        syn = (ca_syn - bt_syn) / ca_syn * 100 if ca_syn else 0.0
-        mix = (ca_mix - bt_mix) / ca_mix * 100 if ca_mix else 0.0
-        print(f"{label:<18}{preset:<9}{gpu+'x'+str(gpr):<9}{syn:>+10.1f}%{mix:>+8.1f}%")
-        rows.append({"setup": label, "model": preset, "gpu": gpu, "gpus_per_replica": gpr,
-                     "num_replicas": nrep, "synthetic_improvement_pct": syn, "mixed_improvement_pct": mix,
-                     "cache_aware_mean_ttft_synthetic": ca_syn, "early_rdma_mean_ttft_synthetic": bt_syn})
-    print("\n(positive = early_rdma lower mean TTFT than cache_aware, the SGLang default router)")
+        ca_pools[label] = replay("cache_aware", windows, cfg)
+        bt_pools[label] = replay("early_rdma", windows, cfg)
+
+    for ds in DATASETS:
+        print(f"=== {ds} ===")
+        print(f"{'setup':<17}{'CA mean':>9}{'CA p95':>9}{'BTB mean':>10}{'BTB p95':>9}"
+              f"{'mean spd':>10}{'p95 spd':>9}")
+        print("-" * 73)
+        for label, preset, gpu, gpr, nrep in SETUPS:
+            ca_mean, ca_p95 = mean_p95(ca_pools[label][ds])
+            bt_mean, bt_p95 = mean_p95(bt_pools[label][ds])
+            sp_mean = (ca_mean - bt_mean) / ca_mean * 100 if ca_mean else 0.0
+            sp_p95 = (ca_p95 - bt_p95) / ca_p95 * 100 if ca_p95 else 0.0
+            print(f"{label:<17}{ca_mean:>8.3f}s{ca_p95:>8.3f}s{bt_mean:>9.3f}s{bt_p95:>8.3f}s"
+                  f"{sp_mean:>+9.1f}%{sp_p95:>+8.1f}%")
+            results[ds].append({
+                "setup": label, "model": preset, "gpu": gpu, "gpus_per_replica": gpr, "num_replicas": nrep,
+                "cache_aware_mean_ttft": ca_mean, "cache_aware_p95_ttft": ca_p95,
+                "early_rdma_mean_ttft": bt_mean, "early_rdma_p95_ttft": bt_p95,
+                "speedup_mean_pct": sp_mean, "speedup_p95_pct": sp_p95})
+        print()
+    print("(speedup = % TTFT reduction, early_rdma vs cache_aware — the SGLang default router)")
 
     out = {
         "constants": {
@@ -275,14 +289,20 @@ def main():
                 "M": "BTB_WARM_COPIES: number of REPLICAS (nodes) to warm; each replica is n_gpus GPUs tensor-parallel, so a copy is sharded across that node's GPUs",
             },
         },
-        "dataset": "Bursted-ART/test.jsonl", "baseline": "cache_aware (SGLang default router, no warming)",
-        "field_definitions": {
-            "synthetic_improvement_pct": "(cache_aware - early_rdma) / cache_aware * 100, mean TTFT over the synthetic (bursty) windows only; positive = early_rdma faster",
-            "mixed_improvement_pct": "same ratio over ALL windows (synthetic + real ART); the realistic average (BTB is inert on non-bursty ART windows)",
-            "cache_aware_mean_ttft_synthetic": "baseline mean time-to-first-token (s), request-weighted, synthetic windows",
-            "early_rdma_mean_ttft_synthetic": "early_rdma mean time-to-first-token (s), request-weighted, synthetic windows",
+        "baseline": "cache_aware (SGLang default router, no warming)",
+        "dataset_definitions": {
+            "Bursted-ART": "the full test set replayed as one real trace (real ART traffic + synchronized bursts)",
+            "normal-ART": "the plain-ART windows only, no synthetic bursts (control: BTB should be inert)",
         },
-        "setups": rows,
+        "field_definitions": {
+            "cache_aware_mean_ttft": "baseline mean time-to-first-token (s), pooled over all requests",
+            "cache_aware_p95_ttft": "baseline 95th-percentile TTFT (s)",
+            "early_rdma_mean_ttft": "early_rdma mean TTFT (s)",
+            "early_rdma_p95_ttft": "early_rdma p95 TTFT (s)",
+            "speedup_mean_pct": "(cache_aware_mean - early_rdma_mean) / cache_aware_mean * 100; positive = faster",
+            "speedup_p95_pct": "(cache_aware_p95 - early_rdma_p95) / cache_aware_p95 * 100; positive = faster",
+        },
+        "datasets": results,
     }
     (HERE / "results.json").write_text(json.dumps(out, indent=2) + "\n")
     print("wrote results.json")
