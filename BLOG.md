@@ -3,6 +3,10 @@
 This post is based on simulator runs from `clean-experiments/results/`.
 Numbers are not hardware measurements; they are mechanism-validation results
 meant to identify when the scheduling idea helps and when it fails.
+The experiments were run in
+[Infer-Sim](https://jwlabs.vercel.app/post/infer-sim), our open-source
+inference simulator for trace replay, routing, queueing, batching, and
+prefix-cache policy experiments.
 
 Large inference batches have a funny way of breaking otherwise reasonable
 routing policies.

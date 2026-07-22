@@ -5,6 +5,10 @@ Status: draft.
 This post is based on simulator runs from `clean-experiments/results/`.
 Numbers are not hardware measurements. They are meant to test the scheduling
 mechanism and identify when it helps.
+The experiments were run in
+[Infer-Sim](https://jwlabs.vercel.app/post/infer-sim), our open-source
+inference simulator for trace replay, routing, queueing, batching, and
+prefix-cache policy experiments.
 
 ## Narrative Plan
 

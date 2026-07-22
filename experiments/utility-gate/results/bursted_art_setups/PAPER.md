@@ -4,6 +4,11 @@
 
 BTB helps when we detect a sustained shared-prefix burst early enough to RDMA-copy existing KV into HBM before later requests arrive.
 
+These experiments were run in
+[Infer-Sim](https://jwlabs.vercel.app/post/infer-sim), our open-source
+inference simulator for trace replay, routing, queueing, batching, and
+prefix-cache policy experiments.
+
 ## Policy
 
 We study one policy: `early_rdma`.
