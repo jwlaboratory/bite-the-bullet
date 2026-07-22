@@ -12,9 +12,14 @@ simulator engine itself lives separately in `inference-sim`.
 - `bite-the-bullet/`: predictive KV warming, ART/Mooncake predictor, and
   end-to-end warming evaluators.
 - `partial-prefill/`: partial-prefix and adaptive idle-only warming sweeps.
+- `experiments/utility-gate/`: real-trace utility-gate harness, model/hardware
+  sweeps, and saved utility-gate results.
 - `clean-experiments/`: clean experiment specs, result JSONs, cross-system
   matrix, and the main blog draft.
-- `paper-experiments/`: paper-oriented experiment planning notes.
+- `data-generation/`: scripts for building BTB JSONL datasets; generated
+  outputs under `data-generation/out/` are ignored.
+- `archive/`: older exploratory runs and paper notes that are useful history
+  but not the current runnable path.
 - `BLOG.md`: current long-form research blog draft.
 
 ## Dependency On The Simulator

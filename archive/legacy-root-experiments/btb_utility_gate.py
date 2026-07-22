@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import csv
 import json
 import math
 import random
@@ -39,6 +40,10 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from sim_path import add_inference_sim_to_path
+
+SIM_ROOT = add_inference_sim_to_path(ROOT)
 
 import config
 from gpu import Node
@@ -368,7 +373,131 @@ def make_cfg(args: argparse.Namespace) -> SimpleNamespace:
     return cfg
 
 
+def load_burstgpt_rows(path_or_url: str, max_rows: int) -> list[dict]:
+    rows = []
+    if path_or_url.startswith(("http://", "https://")):
+        with urllib.request.urlopen(path_or_url, timeout=120) as resp:
+            text_lines = (line.decode("utf-8", errors="replace") for line in resp)
+            reader = csv.DictReader(text_lines)
+            for row in reader:
+                rows.append(row)
+                if max_rows and len(rows) >= max_rows:
+                    break
+    else:
+        with Path(path_or_url).open("r", encoding="utf-8", errors="replace", newline="") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                rows.append(row)
+                if max_rows and len(rows) >= max_rows:
+                    break
+    rows.sort(key=lambda row: float(row.get("Timestamp") or 0.0))
+    return rows
+
+
+def normalize_burstgpt_window(
+    rows: list[dict],
+    window_id: int,
+    key_blocks: int,
+    block_tokens: int,
+    arrival_scale: float,
+) -> list[Obs]:
+    if not rows:
+        return []
+    t0 = float(rows[0].get("Timestamp") or 0.0)
+    obs = []
+    for i, row in enumerate(rows):
+        request_id = f"burstgpt:{window_id}:{i}"
+        session_id = str(row.get("Session ID") or "").strip()
+        if session_id.lower() in {"", "nan", "none", "null"}:
+            session_id = ""
+        input_tokens = max(1, int(float(row.get("Request tokens") or 1)))
+        output_tokens = max(1, int(float(row.get("Response tokens") or 1)))
+        nblocks = max(1, math.ceil(input_tokens / block_tokens))
+        if session_id:
+            blocks = [f"burstgpt:session:{session_id}:b{j}" for j in range(nblocks)]
+        else:
+            blocks = [f"burstgpt:request:{request_id}:b{j}" for j in range(nblocks)]
+        obs.append(
+            Obs(
+                window_id=window_id,
+                row_in_window=i,
+                request_id=request_id,
+                t=(float(row.get("Timestamp") or 0.0) - t0) * arrival_scale,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                blocks=blocks,
+                key=key_for(blocks, key_blocks),
+                first_block=blocks[0] if blocks else "",
+                system_hash=session_id or str(row.get("Model") or ""),
+                message_bytes=0,
+            )
+        )
+    return obs
+
+
+def candidate_indices(args: argparse.Namespace, obs: list[Obs], features: list[dict[str, float]], fcounts: dict[int, int]) -> list[int]:
+    raw_candidates = [
+        i
+        for i, item in enumerate(obs)
+        if item.key and i in fcounts and (args.include_cold_candidates or features[i].get("same_key_seen", 0.0) > 0)
+    ]
+    if args.max_candidates_per_window and len(raw_candidates) > args.max_candidates_per_window:
+        raw_candidates = sorted(
+            raw_candidates,
+            key=lambda i: (
+                features[i].get("same_key_30s", 0.0),
+                features[i].get("same_key_seen", 0.0),
+                fcounts.get(i, 0),
+            ),
+            reverse=True,
+        )[: args.max_candidates_per_window]
+        raw_candidates.sort()
+    return raw_candidates
+
+
+def load_burstgpt_windows(args: argparse.Namespace, cfg: SimpleNamespace) -> list[Window]:
+    rows = load_burstgpt_rows(args.burstgpt_url, args.burstgpt_max_rows)
+    if len(rows) < args.rows_per_window:
+        raise RuntimeError(f"only loaded {len(rows)} BurstGPT rows; need {args.rows_per_window}")
+
+    rng = random.Random(args.seed)
+    max_start = len(rows) - args.rows_per_window
+    if args.burstgpt_starts:
+        starts = [start for start in args.burstgpt_starts if 0 <= start <= max_start]
+    elif args.burstgpt_sequential:
+        starts = [i * args.rows_per_window for i in range(args.windows)]
+        starts = [start for start in starts if start <= max_start]
+    else:
+        starts = sorted(rng.sample(range(max_start + 1), min(args.windows, max_start + 1)))
+    if len(starts) < args.windows:
+        raise RuntimeError(f"only found {len(starts)} BurstGPT windows; requested {args.windows}")
+
+    windows = []
+    source_name = Path(urllib.parse.urlparse(args.burstgpt_url).path).name or Path(args.burstgpt_url).name
+    for w, start in enumerate(starts[: args.windows]):
+        rows_slice = rows[start : start + args.rows_per_window]
+        obs = normalize_burstgpt_window(rows_slice, w, args.key_blocks, args.block_tokens, args.arrival_scale)
+        requests = requests_from_obs(obs, cfg)
+        features = build_feature_rows(obs, cfg, args.warm_blocks, args.horizon_s)
+        fcounts = future_counts(obs, args.horizon_s)
+        raw_candidates = candidate_indices(args, obs, features, fcounts)
+
+        ident = f"{source_name}:start{start}"
+        positives = sum(1 for i in raw_candidates if fcounts.get(i, 0) >= args.future_k)
+        print(
+            f"window {w:02d} {ident:<24} rows={len(rows_slice):<5} "
+            f"span={obs[-1].t if obs else 0:.1f}s candidates={len(raw_candidates):<4} "
+            f"future>=k={positives:<4}",
+            flush=True,
+        )
+        windows.append(Window(ident, obs, requests, features, fcounts, raw_candidates))
+    return windows
+
+
 def load_windows(args: argparse.Namespace, cfg: SimpleNamespace) -> list[Window]:
+    if args.source == "burstgpt_csv":
+        return load_burstgpt_windows(args, cfg)
+
     import fsspec
     import pyarrow.parquet as pq
 
@@ -410,22 +539,7 @@ def load_windows(args: argparse.Namespace, cfg: SimpleNamespace) -> list[Window]
         requests = requests_from_obs(obs, cfg)
         features = build_feature_rows(obs, cfg, args.warm_blocks, args.horizon_s)
         fcounts = future_counts(obs, args.horizon_s)
-        raw_candidates = [
-            i
-            for i, item in enumerate(obs)
-            if item.key and i in fcounts and (args.include_cold_candidates or features[i].get("same_key_seen", 0.0) > 0)
-        ]
-        if args.max_candidates_per_window and len(raw_candidates) > args.max_candidates_per_window:
-            raw_candidates = sorted(
-                raw_candidates,
-                key=lambda i: (
-                    features[i].get("same_key_30s", 0.0),
-                    features[i].get("same_key_seen", 0.0),
-                    fcounts.get(i, 0),
-                ),
-                reverse=True,
-            )[: args.max_candidates_per_window]
-            raw_candidates.sort()
+        raw_candidates = candidate_indices(args, obs, features, fcounts)
 
         ident = f"{entry['filename']}:rg{rg}:start{start}"
         positives = sum(1 for i in raw_candidates if fcounts.get(i, 0) >= args.future_k)
@@ -1044,9 +1158,18 @@ def print_eval(title: str, summary: dict, baseline_name: str = "baseline") -> No
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", choices=["mooncake_parquet", "burstgpt_csv"], default="mooncake_parquet")
     parser.add_argument("--dataset", default="valeriol29/mooncake-traces")
     parser.add_argument("--config-name", default="mooncake")
     parser.add_argument("--split", default="train")
+    parser.add_argument(
+        "--burstgpt-url",
+        default="https://github.com/HPMLL/BurstGPT/releases/download/v2.0/BurstGPT_3.csv",
+        help="BurstGPT CSV URL or local path.",
+    )
+    parser.add_argument("--burstgpt-max-rows", type=int, default=50000)
+    parser.add_argument("--burstgpt-starts", type=int, nargs="*")
+    parser.add_argument("--burstgpt-sequential", action="store_true")
     parser.add_argument("--windows", type=int, default=6)
     parser.add_argument("--train-windows", type=int, default=3)
     parser.add_argument("--rows-per-window", type=int, default=500)
