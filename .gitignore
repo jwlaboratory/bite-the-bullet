@@ -4,4 +4,4 @@ __pycache__/
 .DS_Store
 trace.csv
 output.csv
-data-generation/out/
+workload/generate/out/

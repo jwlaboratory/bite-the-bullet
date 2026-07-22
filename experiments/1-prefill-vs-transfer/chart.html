@@ -1,0 +1,66 @@
+<title>chart</title>
+<style>
+  :root { color-scheme: light; }
+  .viz-root {
+    --surface-1:#ffffff; --text-primary:#0b0b0b; --text-secondary:#52514e; --muted:#898781;
+    --grid:#e1e0d9; --axis:#c3c2b7;
+    --prefill:#e34948; --disk:#eb6834; --rdma:#eda100; --ram:#2a78d6; --hbm:#1baf7a;
+    font-family: system-ui,-apple-system,"Segoe UI",sans-serif; background:#ffffff; margin:0; padding:16px;
+    -webkit-font-smoothing:antialiased;
+  }
+  svg { display:block; width:920px; height:auto; overflow:visible; }
+  .grid-line{stroke:var(--grid);stroke-width:1}
+  .axis-line{stroke:var(--axis);stroke-width:1}
+  .tick{fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+  .axis-title{fill:var(--text-secondary);font-size:11.5px;font-weight:500}
+  .series-line{fill:none;stroke-width:2}
+  .series-line.hero{stroke-width:3}
+  .series-line.faint{stroke-dasharray:2 3;opacity:.85}
+  .dot{stroke:#fff;stroke-width:1.5}
+  .dlabel{font-size:11.5px;font-weight:600}
+  .dlabel-sub{font-size:10px}
+</style>
+<div class="viz-root"><div id="chart"></div></div>
+<script>
+const TOK=[500,1000,2000,8000,16000,32000];
+const S=[
+ {name:"Prefill (recompute)",css:"--prefill",hero:true,v:[35.69,71.39,142.77,571.08,1142.16,2284.33],sub:"71 µs/tok"},
+ {name:"Disk / NVMe",css:"--disk",v:[23.41,46.81,93.62,374.49,748.98,1497.97],sub:"7 GB/s"},
+ {name:"RDMA (remote GPU)",css:"--rdma",v:[0.819,1.638,3.277,13.107,26.214,52.429],sub:"200 GB/s"},
+ {name:"RAM (host, PCIe)",css:"--ram",v:[0.745,1.489,2.979,11.916,23.831,47.663],sub:"220 GB/s"},
+ {name:"HBM (local floor)",css:"--hbm",faint:true,v:[0.0122,0.0245,0.0489,0.1956,0.3913,0.7825],sub:"13.4 TB/s"},
+];
+const col=k=>getComputedStyle(document.querySelector('.viz-root')).getPropertyValue(k).trim();
+const W=900,H=470,m={t:22,r:172,b:48,l:60};
+const xlo=Math.log10(400),xhi=Math.log10(40000),ylo=Math.log10(0.01),yhi=Math.log10(3000);
+const px=t=>m.l+(Math.log10(t)-xlo)/(xhi-xlo)*(W-m.l-m.r);
+const py=v=>m.t+(yhi-Math.log10(v))/(yhi-ylo)*(H-m.t-m.b);
+const NS="http://www.w3.org/2000/svg";
+const el=(n,a)=>{const e=document.createElementNS(NS,n);for(const k in a)e.setAttribute(k,a[k]);return e;};
+const svg=el("svg",{viewBox:`0 0 ${W} ${H}`});
+const yDec=[0.01,0.1,1,10,100,1000],yLab=["10 µs","100 µs","1 ms","10 ms","100 ms","1 s"];
+yDec.forEach((d,i)=>{svg.appendChild(el("line",{class:"grid-line",x1:m.l,x2:W-m.r,y1:py(d),y2:py(d)}));
+ const t=el("text",{class:"tick",x:m.l-8,y:py(d)+3.5,"text-anchor":"end"});t.textContent=yLab[i];svg.appendChild(t);});
+TOK.forEach(t=>{svg.appendChild(el("line",{class:"grid-line",x1:px(t),x2:px(t),y1:m.t,y2:H-m.b,opacity:.5}));
+ const tk=el("text",{class:"tick",x:px(t),y:H-m.b+16,"text-anchor":"middle"});tk.textContent=t>=1000?(t/1000)+"k":t;svg.appendChild(tk);});
+svg.appendChild(el("line",{class:"axis-line",x1:m.l,x2:W-m.r,y1:H-m.b,y2:H-m.b}));
+let xt=el("text",{class:"axis-title",x:(m.l+W-m.r)/2,y:H-6,"text-anchor":"middle"});xt.textContent="Tokens of KV cache";svg.appendChild(xt);
+let yt=el("text",{class:"axis-title",x:0,y:0,"text-anchor":"middle",transform:`translate(15 ${(m.t+H-m.b)/2}) rotate(-90)`});yt.textContent="Time to make resident";svg.appendChild(yt);
+S.forEach(s=>{const c=col(s.css);
+ const d=TOK.map((t,i)=>`${i?"L":"M"}${px(t).toFixed(1)} ${py(s.v[i]).toFixed(1)}`).join(" ");
+ svg.appendChild(el("path",{class:"series-line"+(s.hero?" hero":"")+(s.faint?" faint":""),d,stroke:c}));
+ TOK.forEach((t,i)=>svg.appendChild(el("circle",{class:"dot",cx:px(t),cy:py(s.v[i]),r:s.hero?3.5:3,fill:c})));});
+const lastX=px(TOK[5]),labelX=lastX+14,GAP=30,bot=H-m.b-6;
+const L=S.map(s=>({s,anchor:py(s.v[5])})).sort((a,b)=>a.anchor-b.anchor);
+L.forEach(o=>o.y=o.anchor);
+for(let i=1;i<L.length;i++)if(L[i].y-L[i-1].y<GAP)L[i].y=L[i-1].y+GAP;
+if(L[L.length-1].y>bot){L[L.length-1].y=bot;for(let i=L.length-2;i>=0;i--)if(L[i+1].y-L[i].y<GAP)L[i].y=L[i+1].y-GAP;}
+L.forEach(o=>{const c=col(o.s.css);
+ if(Math.abs(o.y-o.anchor)>2)svg.appendChild(el("path",{d:`M${lastX+5} ${o.anchor} C${labelX-6} ${o.anchor}, ${labelX-8} ${o.y}, ${labelX-2} ${o.y}`,fill:"none",stroke:c,"stroke-width":1,opacity:.5}));
+ const lab=el("text",{class:"dlabel",x:labelX,y:o.y-3,fill:c});lab.textContent=o.s.name;svg.appendChild(lab);
+ const sub=el("text",{class:"dlabel-sub",x:labelX,y:o.y+9,fill:"var(--muted)"});sub.textContent=o.s.sub;svg.appendChild(sub);});
+const gi=3,gx=px(TOK[gi]),y1=py(S[0].v[gi]),y2=py(S[3].v[gi]);
+svg.appendChild(el("line",{x1:gx,x2:gx,y1,y2,stroke:"var(--muted)","stroke-width":1,"stroke-dasharray":"3 3"}));
+const g=el("text",{x:gx-8,y:(y1+y2)/2,"text-anchor":"end","font-size":11,"font-weight":600,fill:"var(--text-secondary)"});g.textContent="≈48×";svg.appendChild(g);
+document.getElementById("chart").appendChild(svg);
+</script>

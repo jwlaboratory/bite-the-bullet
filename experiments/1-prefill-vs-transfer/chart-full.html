@@ -1,0 +1,251 @@
+<title>Prefill vs. KV-cache transfer — H100 node</title>
+<style>
+  .viz-root {
+    --surface-1:      #fcfcfb;
+    --plane:          #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --muted:          #898781;
+    --grid:           #e1e0d9;
+    --axis:           #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --prefill: #e34948;  /* red   */
+    --disk:    #eb6834;  /* orange*/
+    --rdma:    #eda100;  /* yellow*/
+    --ram:     #2a78d6;  /* blue  */
+    --hbm:     #1baf7a;  /* aqua  */
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    .viz-root {
+      --surface-1: #1a1a19; --plane: #0d0d0d;
+      --text-primary: #ffffff; --text-secondary: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+      --prefill:#e66767; --disk:#d95926; --rdma:#c98500; --ram:#3987e5; --hbm:#199e70;
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    --surface-1: #1a1a19; --plane: #0d0d0d;
+    --text-primary: #ffffff; --text-secondary: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --prefill:#e66767; --disk:#d95926; --rdma:#c98500; --ram:#3987e5; --hbm:#199e70;
+  }
+  :root[data-theme="light"] .viz-root {
+    --surface-1: #fcfcfb; --plane: #f9f9f7;
+    --text-primary: #0b0b0b; --text-secondary: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+    --prefill:#e34948; --disk:#eb6834; --rdma:#eda100; --ram:#2a78d6; --hbm:#1baf7a;
+  }
+  .viz-root {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--plane); color: var(--text-primary);
+    margin: 0; padding: 28px 24px 40px; line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 650; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { font-size: 13.5px; color: var(--text-secondary); margin: 0 0 20px; }
+  .sub b { color: var(--text-primary); font-weight: 600; }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 18px 18px 10px; margin-bottom: 20px; }
+  svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .grid-line { stroke: var(--grid); stroke-width: 1; }
+  .axis-line { stroke: var(--axis); stroke-width: 1; }
+  .tick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .axis-title { fill: var(--text-secondary); font-size: 11.5px; font-weight: 500; }
+  .series-line { fill: none; stroke-width: 2; }
+  .series-line.hero { stroke-width: 3; }
+  .series-line.faint { stroke-dasharray: 2 3; opacity: .85; }
+  .dot { stroke: var(--surface-1); stroke-width: 1.5; }
+  .dlabel { font-size: 11.5px; font-weight: 600; }
+  .dlabel-sub { font-size: 10px; }
+  .hit { fill: transparent; cursor: pointer; }
+  .tip { position: fixed; pointer-events: none; z-index: 10; background: var(--surface-1);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px;
+    box-shadow: 0 4px 16px rgba(0,0,0,.14); opacity: 0; transition: opacity .1s; min-width: 150px; }
+  .tip .th { font-weight: 650; margin-bottom: 4px; font-variant-numeric: tabular-nums; }
+  .tip .tr { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .tip .tr .nm { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); }
+  .tip .sw { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+  .tip .vv { font-variant-numeric: tabular-nums; font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--grid); }
+  th:first-child, td:first-child { text-align: left; }
+  thead th { color: var(--text-secondary); font-weight: 600; border-bottom: 1px solid var(--axis); }
+  td.nm { text-align: left; }
+  .chip { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 7px; vertical-align: middle; }
+  .setup { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .tile .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .tile .v { font-size: 20px; font-weight: 650; margin: 2px 0 1px; }
+  .tile .d { font-size: 11.5px; color: var(--text-secondary); }
+  .note { font-size: 12.5px; color: var(--text-secondary); margin: 14px 0 0; }
+  .note code { background: var(--plane); padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
+  h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--text-secondary); margin: 0 0 12px; }
+</style>
+
+<div class="viz-root">
+<div class="wrap">
+  <h1>Prefill is compute; reuse is bandwidth</h1>
+  <p class="sub">Time to make <b>N tokens</b> of KV cache resident on one node — <b>4×H100 tensor-parallel</b>, Llama-3.3-70B fp16.
+    Recomputing it via prefill vs. moving the already-computed KV in from a memory tier. Bandwidths are <b>node-aggregate</b>
+    (per-GPU ÷4); RAM and RDMA nearly coincide (220 vs 200 GB/s). Both axes log.</p>
+
+  <div class="card">
+    <div id="chart"></div>
+  </div>
+
+  <div class="card">
+    <h2>The same numbers (milliseconds)</h2>
+    <table id="tbl"></table>
+  </div>
+
+  <div class="card">
+    <h2>Standard H100 setup — per-node (4 GPUs, tensor-parallel)</h2>
+    <div class="setup" id="setup"></div>
+    <p class="note" id="setupnote"></p>
+  </div>
+</div>
+</div>
+<div class="tip" id="tip"></div>
+
+<script>
+const TOK = [500, 1000, 2000, 8000, 16000, 32000];
+// ms, computed from inference-sim config.py / gpu.py
+const S = [
+  { key:"prefill", name:"Prefill (recompute)", css:"--prefill", hero:true,
+    v:[35.69, 71.39, 142.77, 571.08, 1142.16, 2284.33], sub:"71 µs/tok" },
+  { key:"disk", name:"Disk / NVMe", css:"--disk",
+    v:[23.41, 46.81, 93.62, 374.49, 748.98, 1497.97], sub:"7 GB/s" },
+  { key:"rdma", name:"RDMA (remote GPU)", css:"--rdma",
+    v:[0.819, 1.638, 3.277, 13.107, 26.214, 52.429], sub:"200 GB/s" },
+  { key:"ram", name:"RAM (host, PCIe)", css:"--ram",
+    v:[0.745, 1.489, 2.979, 11.916, 23.831, 47.663], sub:"220 GB/s" },
+  { key:"hbm", name:"HBM (local floor)", css:"--hbm", faint:true,
+    v:[0.0122, 0.0245, 0.0489, 0.1956, 0.3913, 0.7825], sub:"13.4 TB/s" },
+];
+const col = k => getComputedStyle(document.querySelector('.viz-root')).getPropertyValue(k).trim();
+
+// ---- scales (log-log) ----
+const W = 900, H = 460, m = { t: 18, r: 168, b: 46, l: 58 };
+const xlo = Math.log10(400), xhi = Math.log10(40000);
+const ylo = Math.log10(0.01), yhi = Math.log10(3000);
+const px = t => m.l + (Math.log10(t) - xlo) / (xhi - xlo) * (W - m.l - m.r);
+const py = v => m.t + (yhi - Math.log10(v)) / (yhi - ylo) * (H - m.t - m.b);
+
+function fmtMs(v){
+  if (v < 0.1) return (v*1000).toFixed(1).replace(/\.0$/,'') + " µs";
+  if (v < 1) return v.toFixed(2) + " ms";
+  if (v < 1000) return v.toFixed(v<10?2:0) + " ms";
+  return (v/1000).toFixed(2) + " s";
+}
+
+function chart(){
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("role", "img");
+  const el = (n, a) => { const e = document.createElementNS(NS, n); for (const k in a) e.setAttribute(k, a[k]); return e; };
+
+  // y gridlines at decades
+  const yDec = [0.01, 0.1, 1, 10, 100, 1000];
+  const yLab = ["10 µs","100 µs","1 ms","10 ms","100 ms","1 s"];
+  yDec.forEach((d,i) => {
+    svg.appendChild(el("line", { class:"grid-line", x1:m.l, x2:W-m.r, y1:py(d), y2:py(d) }));
+    const tk = el("text", { class:"tick", x:m.l-8, y:py(d)+3.5, "text-anchor":"end" });
+    tk.textContent = yLab[i]; svg.appendChild(tk);
+  });
+  // x ticks
+  TOK.forEach(t => {
+    svg.appendChild(el("line", { class:"grid-line", x1:px(t), x2:px(t), y1:m.t, y2:H-m.b, opacity:.5 }));
+    const tk = el("text", { class:"tick", x:px(t), y:H-m.b+16, "text-anchor":"middle" });
+    tk.textContent = t >= 1000 ? (t/1000)+"k" : t; svg.appendChild(tk);
+  });
+  svg.appendChild(el("line", { class:"axis-line", x1:m.l, x2:W-m.r, y1:H-m.b, y2:H-m.b }));
+  const xt = el("text", { class:"axis-title", x:(m.l+W-m.r)/2, y:H-6, "text-anchor":"middle" });
+  xt.textContent = "Tokens of KV cache"; svg.appendChild(xt);
+  const ytg = el("text", { class:"axis-title", x:0, y:0, "text-anchor":"middle",
+    transform:`translate(14 ${(m.t+H-m.b)/2}) rotate(-90)` });
+  ytg.textContent = "Time to make resident"; svg.appendChild(ytg);
+
+  // lines + dots
+  S.forEach(s => {
+    const c = col(s.css);
+    const d = TOK.map((t,i) => `${i?"L":"M"}${px(t).toFixed(1)} ${py(s.v[i]).toFixed(1)}`).join(" ");
+    svg.appendChild(el("path", { class:"series-line"+(s.hero?" hero":"")+(s.faint?" faint":""), d, stroke:c }));
+    TOK.forEach((t,i) => svg.appendChild(el("circle", { class:"dot", cx:px(t), cy:py(s.v[i]), r:s.hero?3.5:3, fill:c })));
+  });
+
+  // direct labels at right end, de-collided (leader lines where nudged)
+  const lastX = px(TOK[TOK.length-1]);
+  const labelX = lastX + 14, GAP = 30, top = m.t + 6, bot = H - m.b - 6;
+  const L = S.map(s => ({ s, anchor: py(s.v[s.v.length-1]) }))
+             .sort((a,b) => a.anchor - b.anchor);
+  L.forEach(o => { o.y = o.anchor; });
+  for (let i = 1; i < L.length; i++)                       // push down
+    if (L[i].y - L[i-1].y < GAP) L[i].y = L[i-1].y + GAP;
+  if (L[L.length-1].y > bot) {                             // pull back up if overflow
+    L[L.length-1].y = bot;
+    for (let i = L.length-2; i >= 0; i--)
+      if (L[i+1].y - L[i].y < GAP) L[i].y = L[i+1].y - GAP;
+  }
+  L.forEach(o => {
+    const c = col(o.s.css);
+    if (Math.abs(o.y - o.anchor) > 2)                      // leader from point to label
+      svg.appendChild(el("path", { d:`M${lastX+5} ${o.anchor} C${labelX-6} ${o.anchor}, ${labelX-8} ${o.y}, ${labelX-2} ${o.y}`,
+        fill:"none", stroke:c, "stroke-width":1, opacity:.5 }));
+    const lab = el("text", { class:"dlabel", x:labelX, y:o.y-3, fill:c }); lab.textContent = o.s.name;
+    svg.appendChild(lab);
+    const sub = el("text", { class:"dlabel-sub", x:labelX, y:o.y+9, fill:"var(--muted)" }); sub.textContent = o.s.sub;
+    svg.appendChild(sub);
+  });
+
+  // gap annotation (prefill vs ram at 8k)
+  const gi = 3;
+  const gx = px(TOK[gi]);
+  const y1 = py(S[0].v[gi]), y2 = py(S[3].v[gi]);
+  svg.appendChild(el("line", { x1:gx, x2:gx, y1:y1, y2:y2, stroke:"var(--muted)", "stroke-width":1, "stroke-dasharray":"3 3" }));
+  const g = el("text", { x:gx-8, y:(y1+y2)/2, "text-anchor":"end", "font-size":11, "font-weight":600, fill:"var(--text-secondary)" });
+  g.textContent = "≈48×"; svg.appendChild(g);
+
+  // hover hit targets
+  const tip = document.getElementById("tip");
+  TOK.forEach((t,i) => {
+    const hit = el("rect", { class:"hit", x:px(t)-16, y:m.t, width:32, height:H-m.t-m.b });
+    hit.addEventListener("mousemove", (e) => {
+      let rows = S.map(s => `<div class="tr"><span class="nm"><span class="sw" style="background:${col(s.css)}"></span>${s.name}</span><span class="vv">${fmtMs(s.v[i])}</span></div>`).join("");
+      tip.innerHTML = `<div class="th">${t.toLocaleString()} tokens</div>${rows}`;
+      tip.style.opacity = 1; tip.style.left = (e.clientX+14)+"px"; tip.style.top = (e.clientY-10)+"px";
+    });
+    hit.addEventListener("mouseleave", () => tip.style.opacity = 0);
+    svg.appendChild(hit);
+  });
+
+  document.getElementById("chart").appendChild(svg);
+}
+
+function table(){
+  const head = `<thead><tr><th>Source</th>${TOK.map(t=>`<th>${t>=1000?(t/1000)+"k":t}</th>`).join("")}</tr></thead>`;
+  const body = S.map(s => `<tr><td class="nm"><span class="chip" style="background:${col(s.css)}"></span>${s.name}</td>${
+    s.v.map(v=>`<td>${fmtMs(v)}</td>`).join("")}</tr>`).join("");
+  document.getElementById("tbl").innerHTML = head + `<tbody>${body}</tbody>`;
+}
+
+function setup(){
+  const tiles = [
+    { k:"HBM", v:"13.4 TB/s", d:"local GPU memory · 320 GB · ~0 latency" },
+    { k:"RAM (PCIe)", v:"220 GB/s", d:"host DRAM ↔ GPU · TB-scale · ~µs" },
+    { k:"RDMA", v:"200 GB/s", d:"peer node's HBM over 400G NIC · ~10 µs" },
+    { k:"Disk / NVMe", v:"7 GB/s", d:"local SSD pool · ~100s µs · vast" },
+    { k:"Prefill", v:"71 µs/tok", d:"4×H100 @ 1.98 PFLOP/s eff (MFU 0.5)" },
+    { k:"KV size", v:"320 KiB/tok", d:"80 layers · 8 KV heads · fp16 (GQA)" },
+  ];
+  document.getElementById("setup").innerHTML = tiles.map(t =>
+    `<div class="tile"><div class="k">${t.k}</div><div class="v">${t.v}</div><div class="d">${t.d}</div></div>`).join("");
+  document.getElementById("setupnote").innerHTML =
+    "Per-GPU H100: HBM 3.35 TB/s / 80 GB · PCIe 55 GB/s · RDMA 50 GB/s (400G NIC) · NVMe 7 GB/s · 989 TFLOP/s peak. "+
+    "A node is 4 GPUs tensor-parallel, so compute, HBM, PCIe and RDMA aggregate ×4 (NVMe pool does not). "+
+    "Bandwidths are node-aggregate; ratios above are bandwidth-limited transfers vs. compute-bound prefill and hold at any token count.";
+}
+
+chart(); table(); setup();
+</script>

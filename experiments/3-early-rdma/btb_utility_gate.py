@@ -1789,7 +1789,7 @@ def parse_args() -> argparse.Namespace:
         help="Optional per-window cap for early-burst triggers; 0 means no cap.",
     )
     parser.add_argument("--progress-every", type=int, default=20)
-    parser.add_argument("--out", default="experiments/utility-gate/results/btb_utility_gate_results.json")
+    parser.add_argument("--out", default="experiments/3-early-rdma/results/btb_utility_gate_results.json")
     return parser.parse_args()
 
 

@@ -1,0 +1,40 @@
+[audit] ART-Chat-2.5M ...
+          rows=300,000  deep-sync fanout(>=16blk,10s)=25 (span 2.809s)  shallow fanout(>=8blk,60s)=103 (steady shared-template stream (not a synchronized job))  TARGET=PRESENT
+[audit] Mooncake-conversation ...
+          rows=12,031  deep-sync fanout(>=16blk,10s)=2 (span 6.0s)  shallow fanout(>=8blk,60s)=4 (steady shared-template stream (not a synchronized job))  TARGET=absent
+[audit] Mooncake-toolagent ...
+          rows=23,608  deep-sync fanout(>=16blk,10s)=2 (span 6.0s)  shallow fanout(>=8blk,60s)=206 (steady shared-template stream (not a synchronized job))  TARGET=absent
+[audit] Mooncake-arxiv ...
+          rows=23,608  deep-sync fanout(>=16blk,10s)=2 (span 6.109s)  shallow fanout(>=8blk,60s)=195 (steady shared-template stream (not a synchronized job))  TARGET=absent
+[audit] BurstGPT ...
+          rows=300,000 (no prefix info) raw_max/60s=884
+[audit] Bursted-ART-synthetic (CONTROL) ...
+          rows=76,800  deep-sync fanout(>=16blk,10s)=500 (span 1.0s)  shallow fanout(>=8blk,60s)=500 (clustered)  TARGET=PRESENT
+
+[audit] wrote dataset-audit/results/burst_audit.json and dataset-audit/results/burst_audit.md
+
+# Audit: are synchronized same-prefix fan-out bursts present in public traces?
+
+_Generated 2026-07-22T17:03:38.665904+00:00 • max_rows/trace=300000 • windows=[1.0, 10.0, 60.0]s • depths=[1, 2, 4, 8, 16, 32] blocks_
+
+**Target pattern:** K+ requests sharing a *long, job-unique* prefix, arriving *together*. Concretely: fan-out ≥ 20 at shared-prefix depth ≥ 16 blocks (~8k tokens) inside a ≤ 10s window. A shallow prefix shared by everyone (a global system-prompt template) or a reuse spread over minutes does **not** count — those are ordinary chat/agent traffic, not a data-labeling sweep or a synchronized sub-agent fan-out.
+
+## Headline
+
+Two numbers per trace. **Deep-sync fan-out** is the target metric (≥16 blocks, ≤10s). **Shallow-wide fan-out** (≥8 blocks, 60s) is the number that *looks* like a burst — its arrival span tells you whether it is a synchronized job (span ≪ window) or a steady shared-template stream (span ≈ window).
+
+| Trace | Rows | Span | **Deep-sync fan-out** (≥16blk,≤10s, sessions excluded) | Largest deep cluster incl. sessions | Shallow fan-out (≥8blk,60s) | Target present? |
+| --- | ---: | ---: | ---: | ---: | ---: | :---: |
+| ART-Chat-2.5M | 300,000 | 1483.6 min | **25** | 25 (fanout) | 103 (59.636s, steady) | ✅ YES |
+| Mooncake-conversation | 12,031 | 58.9 min | **2** | 2 (fanout) | 4 (57s, steady) | ❌ no |
+| Mooncake-toolagent | 23,608 | 58.9 min | **2** | 2 (fanout) | 206 (59.999s, steady) | ❌ no |
+| Mooncake-arxiv | 23,608 | 60.0 min | **2** | 2 (fanout) | 195 (58.014s, steady) | ❌ no |
+| BurstGPT | 300,000 | 21005.4 min | n/a (no prefix) | n/a | raw 884/60s | ❌ n/a |
+| Bursted-ART-synthetic (CONTROL) | 76,800 | 7.9 min | **500** | 500 (fanout) | 500 (1s) | ✅ YES |
+
+## Structural absence (no download needed)
+
+- **LMSYS-Chat-1M** (`hf:lmsys/lmsys-chat-1m (gated)`): Chat-UI conversation dump. Gated; and it carries no per-request arrival timestamps -> a synchronized arrival burst cannot exist by construction. It records what users typed into a demo arena, not a production serving endpoint.
+- **ShareGPT** (`web-scraped ShareGPT conversations`): Conversation dump scraped from the ShareGPT sharing site. No timestamps and no arrival order -> no burst structure exists to measure. These are shared chat transcripts, not an inference endpoint's request log.
+
+

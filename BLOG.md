@@ -1,315 +1,346 @@
-# Biting The Bullet: Predicting Inference Bursts And Warming KV Before The Queue Forms
+# Bite The Bullet: Early RDMA For Shared-Prefix Bursts
 
-This post is based on simulator runs from `clean-experiments/results/`.
-Numbers are not hardware measurements; they are mechanism-validation results
-meant to identify when the scheduling idea helps and when it fails.
-The experiments were run in
+This repo studies one narrow mechanism:
+
+> Detect sustained reuse of a long prompt prefix, then RDMA-copy that prefix KV
+> into the HBM of less-busy replicas before later requests arrive.
+
+The active policy is `early_rdma`. It does not speculate by recomputing prefill
+on idle GPUs. It only moves KV that already exists in HBM.
+
+The short paper memo is `experiments/3-early-rdma/PAPER.md`. This blog is the longer
+explanation: what the method is, when it should work, when it should fail, how
+the dataset is generated, and where the artifacts live.
+
+The experiments run in
 [Infer-Sim](https://jwlabs.vercel.app/post/infer-sim), our open-source
 inference simulator for trace replay, routing, queueing, batching, and
-prefix-cache policy experiments.
+prefix-cache policy experiments. These are simulator results, not hardware
+measurements.
 
-Large inference batches have a funny way of breaking otherwise reasonable
-routing policies.
+## The Problem
 
-Imagine a data-labeling job, an agent spawning hundreds of subagents, or a tool
-workflow that asks the model to score many records against the same long
-document. The requests are not identical, but the first 64k tokens are the same.
-Each request has a small unique suffix. Each request may only need one token of
-output.
+Some inference workloads send many requests that share a long prefix:
 
-From the model's point of view, the expensive part is obvious: read the long
-shared prefix once, cache the KV, and reuse it.
+- data-labeling jobs scoring many records against the same document;
+- batch extraction over one shared context;
+- agent fanout where many subagents inherit the same system prompt;
+- evaluation workloads that sample many answers from the same prompt.
 
-From the router's point of view, things are more awkward. If we route everything
-to the replica that already has the prefix cached, that replica queues hundreds
-of requests. If we spread requests by least load, we reduce queueing, but now
-other replicas may have to redo the long prefill. The cache saved compute, but
-the queue ate the latency.
+For those requests, the expensive part is the shared prefill. Once one replica
+has computed KV for the prefix, later requests can be much cheaper if they land
+where that KV already lives.
 
-This post is about a simple idea: what if we predict that burst before it
-arrives, then "bite the bullet" early by prefilling the shared prefix on more
-than one replica?
+But pure cache affinity creates another problem. If every request goes to the
+same replica, that replica can form a queue while other replicas sit less busy.
+Least-load routing fixes the queue, but it may throw away KV locality.
 
-In other words: pay some prefill before the queue forms.
+BTB is trying to get both:
 
-## The Two Parts Of LLM Inference
+1. keep KV locality;
+2. spread later requests across multiple replicas;
+3. pay the KV movement cost early enough that request TTFT improves.
 
-For user-visible latency, two metrics matter most.
+## The Policy
 
-**Time to first token, or TTFT**, is the time from request arrival until the
-first output token appears. TTFT is usually dominated by:
+We study one policy: `early_rdma`.
 
-- queue time: waiting behind other requests;
-- prefill time: reading the input prompt and building KV cache.
+When requests arrive, the router watches prefix-block hashes. If the same prefix
+appears enough times inside a short window, that prefix becomes active. Later
+requests with that active prefix trigger a prefetch attempt.
 
-**Per-token latency** is the time between streamed output tokens. That is mostly
-decode speed: generating one token at a time.
+The prefetch rule is simple:
 
-For long-input, short-output workloads, TTFT is often the whole user
-experience. If a labeling request has a 65k-token prompt and asks for a single
-classification token, the request is basically all prefill.
+1. Find a source replica that already has the prefix KV in HBM.
+2. Pick less-busy target replicas.
+3. RDMA-copy the KV into target HBM until the prefix has the configured number
+   of resident copies.
+4. Route future same-prefix requests across those warmed replicas.
 
-That is the workload we care about here.
+In the current experiments, the target is 4 total HBM copies of the hot prefix.
+So yes, BTB can send KV to multiple replicas. It is not just copying to one GPU.
+A replica may itself contain multiple GPUs; the simulator models the serving
+replica as the scheduling target.
 
-## The Burst Failure Mode
+## How It Knows When To Fire
 
-Suppose a batch job sends 500 requests in one second. Every request shares a
-65,536-token prefix and has a 256-token unique suffix. The serving system has a
-max decode batch of 256 sequences per replica.
+The current detector is deliberately simple:
 
-There are three natural routing choices.
+```text
+if the same prefix appears enough times inside a short time window:
+    mark that prefix active
+```
 
-**Pure cache affinity** sends the request to the replica with the prefix cached.
-That maximizes reuse, but it can pile the whole burst onto one replica.
+This is not a trained model yet. It is a gate around an observable signal:
+repeated same-prefix arrivals. That makes the result easier to reason about.
+We are testing whether the mechanism pays off when the burst signal is present,
+not claiming we have solved every predictor problem.
 
-**Least-load routing** spreads requests across replicas. That helps queueing,
-but it may recompute the long shared prefix on replicas that do not have the
-KV.
+The policy should fire when future reuse is likely large enough to repay the
+copy. It should not fire for isolated repeats, tiny prefixes, or bursts that
+finish before the copied KV can be reused.
 
-**Cache-aware routing** tries to balance both: prefer cache hits unless the
-cached replica is too overloaded. This is a strong default, but it is still
-reactive. It starts splitting after load has already appeared.
+## Cost Model
 
-The idea here is to act before that point.
+The simulator does account for RDMA transfer cost.
 
-## Biting The Bullet
+For each prefetch:
 
-"Bite the bullet" is a predictive warming policy.
+```text
+bytes_moved = warm_blocks * block_bytes
+copy_time = bytes_moved / rdma_bandwidth
+```
 
-When a request arrives, or when job metadata appears, the system asks:
+That copy time advances the target replica's local busy timeline. Results track:
 
-1. Does this look like the beginning of a large same-prefix burst?
-2. Which prefix blocks are likely to be reused?
-3. How much time do we have before the burst lands?
-4. Which idle replicas can prefill part of that prefix in time?
+- `warm_gb`: total KV moved;
+- `warm_busy_s`: simulated busy time caused by prefetch;
+- `warm_count`: number of prefetch actions.
 
-Then it chooses an action:
+This captures per-replica bandwidth cost and queue interference. It does not
+yet model a full shared network fabric, source-NIC contention, switch-level
+congestion, or multi-tenant RDMA interference. So the current claim should be
+read as "bandwidth-cost-aware," not "full-network-contention-complete."
 
-- pin existing KV if a hot prefix is already resident;
-- prefetch KV from host or disk if the cache exists outside HBM;
-- replicate KV to another worker if fast interconnect is available;
-- speculatively prefill the prefix on another replica if the KV does not exist.
+## Why We Had To Build A Dataset
 
-The most important rule is not "always warm." The rule is:
+Before generating anything, we checked whether the workload already exists in the
+public traces these papers usually reach for. The learned-prefix-caching work and
+"Not All Tokens Are Worth Caching," for example, lean on LMSYS-Chat-1M and
+ShareGPT. The problem is that none of the standard datasets actually contain the
+pattern `early_rdma` targets: a **synchronized deep-prefix fan-out** — many
+requests that share a long, job-unique prefix and arrive together, the way a
+data-labeling sweep or a multi-agent job hits a serving endpoint.
 
-> Only warm a prefix depth that can finish before the predicted burst. If that
-> is not possible, warm a shallower prefix or do nothing.
+We audited them (`workload/audit/`). We define a **deep** burst precisely: ≥ 20
+requests sharing a prefix of **≥ 16 blocks (~8k tokens)**, all arriving inside a
+**≤ 10-second window**. The results split cleanly into three failure modes:
 
-That rule matters a lot in the results.
+- **LMSYS-Chat-1M and ShareGPT don't have arrival timestamps at all.** They are
+  chat-arena / share-link conversation dumps, so a burst cannot exist by
+  construction — there is no arrival process to be bursty. They record what users
+  typed into a demo, not the request log of a production endpoint.
+- **BurstGPT has timestamps but no prompts or prefix hashes.** You can see the
+  arrival rate spike, but with no content there is no way to tell whether a spike
+  is many requests sharing a prefix or just unrelated traffic. The one thing the
+  policy keys on — repeated shared prefixes — simply isn't recorded.
+- **Mooncake and ART-Chat have both, and still barely show it.** In the Mooncake
+  traces (conversation, tool-agent, arxiv), the largest synchronized deep-prefix
+  fan-out is **2** — essentially none. The big-looking numbers there (~200
+  requests sharing the first few blocks) are a single system-prompt *template*
+  shared by a steady trickle of unrelated requests across the whole hour; require
+  a genuinely long shared prefix and it collapses to single digits. ART-Chat-2.5M
+  is the only public trace that contains the pattern at all, and only marginally:
+  **3 qualifying events in 300,000 requests**, the largest a **25-way** fan-out
+  (within ~2.8 s) — versus the hundreds-to-thousands of a real production labeling
+  job. Tellingly, ART is already a specialized decoded-LLM-response / agent-eval
+  corpus, which is exactly why we build on it.
+
+![Public LLM traces vs. a synthetic data-labeling workload. Left: the largest
+synchronized deep-prefix fan-out per dataset (log scale) — Mooncake 2, ART 25,
+our synthetic 500. Right: fan-out collapses as you demand a longer shared prefix
+in the real traces, while the synthetic workload stays flat.](workload/audit/results/burst_audit_chart.png)
+
+As a control, we ran the same detector on Bursted-ART itself: it fires at a
+**500-way** fan-out in a 1-second window, confirming the null results above are a
+real absence, not a broken detector. The takeaway is simple — these datasets were
+captured on demo, arena, and short-lived chat/coding endpoints, not on production
+endpoints running data-labeling or multi-agent fan-out jobs, so none of them
+represent the regime this mechanism is for. That is why we built one.
+
+The full report and per-dataset numbers are in
+`workload/audit/results/burst_audit.md`; regenerate everything with
+`python3 workload/audit/audit_burst_absence.py`.
+
+## Dataset: Bursted-ART
+
+The current dataset work lives outside the experiment harness in
+`workload/generate/`.
+
+Hugging Face repo:
+[shreybirmiwal/Bursted-ART](https://huggingface.co/datasets/shreybirmiwal/Bursted-ART)
+
+Local generated datasets:
+
+- `workload/generate/out/Bursted-ART/`
+- `workload/generate/out/Bursted-ART-60s/`
+
+Each generated dataset folder contains:
+
+- `train.jsonl`
+- `test.jsonl`
+- `dataset_info.json`
+- `README.md`
+
+`Bursted-ART` is a mixed dataset. "Mixed" means real ART replay windows plus
+synthetic same-prefix fanout windows. "Synthetic" means only the generated
+fanout windows.
+
+The ART rows come from `alessiotoniolo/ART-Chat-2.5M`. We keep the trace shape:
+timestamps, prompt lengths, output lengths, request IDs, session IDs, group IDs,
+and prefix hashes. Raw ART messages are omitted; message byte counts are kept in
+metadata.
+
+The synthetic rows are added because public traces do not reliably contain the
+large synchronized same-prefix bursts that this mechanism is designed for. A
+synthetic window models a batch or agent-fanout job:
+
+- 8 burst jobs per synthetic window;
+- 500 requests per burst;
+- 65,536 shared prefix tokens;
+- 256 unique suffix tokens per request;
+- 1 output token;
+- 120 one-request decoy jobs;
+- 6 seconds of predictor lead time.
+
+The default generated dataset has:
+
+- 40 complete trace windows;
+- 20 ART windows and 20 synthetic windows;
+- 10 train windows and 30 test windows;
+- 102,400 request rows total;
+- 25,600 train rows and 76,800 test rows;
+- 20,000 ART rows and 82,400 synthetic rows.
+
+The split is by complete trace window, not individual request row. That is
+important because requests inside one burst are correlated. Row-level splitting
+would leak burst structure from train to test.
+
+There are two generated variants:
+
+- `Bursted-ART`: synthetic bursts span 1 second.
+- `Bursted-ART-60s`: the same recipe, but synthetic bursts span 60 seconds.
+
+The 1-second variant is the hard case: the burst arrives fast, so there may not
+be enough time for RDMA to pay back. The 60-second variant is the ideal paper
+case: reuse is sustained long enough that early movement can help.
+
+Generate the uploaded dataset:
+
+```bash
+python3 workload/generate/generate_combined_dataset.py \
+  --out-dir workload/generate/out/Bursted-ART
+```
+
+Generate the 60-second variant:
+
+```bash
+python3 workload/generate/generate_combined_dataset.py \
+  --synthetic-burst-window-s 60 \
+  --out-dir workload/generate/out/Bursted-ART-60s
+```
+
+Upload:
+
+```bash
+python3 workload/generate/upload_to_hf.py \
+  --dataset-dir workload/generate/out/Bursted-ART \
+  --repo-id shreybirmiwal/Bursted-ART
+```
+
+The exact generation args and window boundaries are recorded in each
+`dataset_info.json`.
 
 ## Experiment Setup
 
-The main synthetic workload is intentionally sharp:
+The current paper result uses four model/hardware setups:
 
-- 8 burst jobs.
-- 500 requests per burst.
-- 65,536-token shared prefix.
-- 256-token unique suffix.
-- 1 output token.
-- requests arrive within a 1 second burst window.
-- no RDMA.
-- HBM-only prefix cache.
-- max serving batch: 256.
-- cache-aware threshold: split when imbalance exceeds 8 in-flight requests.
+- `dense1t_b300x4`
+- `70b_h100x4_base`
+- `kimi_k2_h100x8`
+- `glm52_h100x8`
 
-The one-token output is deliberate. It models labeling, scoring, extraction,
-and agent fanout where the answer is tiny and TTFT dominates.
+Each setup is evaluated on both datasets:
 
-The main GLM-like run uses:
+- synthetic-only held-out windows;
+- mixed held-out windows with ART plus synthetic traffic.
 
-- 8 independent replicas.
-- each replica is 8 x H100 80GB with tensor parallelism 8.
-- 64 total H100s.
-- GLM-like 744B MoE shape.
-- 40B active parameters per token.
-- compressed MLA-like KV proxy.
+The active results are stored in:
 
-Important caveat: the simulator currently has one dtype knob shared by weights
-and KV. The GLM preset uses int4 weights and int4 KV as a proxy. Real fp8 KV
-would make warmed-KV bytes about 2x larger than reported here.
+- `experiments/3-early-rdma/PAPER.md`
+- `experiments/3-early-rdma/results/results.json`
 
-## Main Result: Same-Prefix Burst
+Older speculative-prefill, partial-prefix, Mooncake, and model-sweep result
+dumps are preserved under `archive/`.
 
-On the GLM-like 8 x 8 H100 setup, cache-aware routing gets p95 TTFT down to
-1.313 seconds. Predictive warming improves that sharply.
+## Results
 
-| Warm depth | p95 TTFT | p95 reduction vs cache-aware | Mean TTFT reduction | Warm KV | Warm busy time |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 16,384 tokens | 0.982s | 25.2% | 18.6% | 11.8 GB | 10.6s |
-| 32,768 tokens | 0.651s | 50.4% | 51.3% | 23.6 GB | 21.2s |
-| 65,536 tokens | 0.005s | 99.6% | 99.5% | 47.1 GB | 42.4s |
+Positive numbers mean lower TTFT than the baseline. Negative numbers mean BTB
+made TTFT worse.
 
-This is the cleanest result in the project.
-
-If the predictor is right and there is enough warm lead time, moving prefill
-off the request critical path can almost erase TTFT for this workload. Partial
-warming is the cheaper point: warming half the prefix cuts p95 TTFT by 50.4%
-with half the warm KV and half the warm busy time of full warming.
-
-Full warming is the latency winner when prediction is perfect.
-
-## Is This Only A GLM Result?
-
-To check that, we reran the same target workload across more standard simulated
-systems.
-
-| System | Lead time | Cache-aware p95 | Best warm p95 | p95 reduction | Mean TTFT reduction |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Llama-70B fp16, 4 replicas x 4 H100 | 6s | 6.333s | 1.638s | 74.1% | 84.4% |
-| Llama-70B fp16, 8 replicas x 4 H100 | 6s | 5.047s | 1.638s | 67.5% | 82.2% |
-| Llama-70B fp16, 8 replicas x 8 H100 | 6s | 2.339s | 0.290s | 87.6% | 93.3% |
-| GLM-like 744B MoE, 8 replicas x 8 H100 | 6s | 1.313s | 0.005s | 99.6% | 99.5% |
-
-That is the broader positive claim:
-
-> On synchronized same-prefix bursts, speculative prefix warming reduces p95
-> TTFT by 67-99% on H100-class simulated deployments.
-
-This is not just a quirk of the GLM-like setup. The same mechanism helps across
-Llama-70B/H100 systems too.
-
-## But It Does Not Always Help
-
-The A100 rows are the useful counterexample.
-
-On Llama-70B fp16 with 8 replicas x 4 A100 and only 6 seconds of lead time,
-warming 32k or 65k tokens is too slow. The speculative prefill is not ready
-before the burst. Instead of helping, it makes p95 TTFT much worse:
-
-| System | Lead time | Best tested warm depth | p95 result |
+| Case | Mean TTFT | P95 TTFT | Speedup |
 | --- | ---: | ---: | ---: |
-| 8 replicas x 4 A100 | 6s | 32,768 tokens | 149.9% worse p95 |
-| 8 replicas x 4 A100, shallow sweep | 6s | 16,384 tokens | 0.2% worse p95, 10.5% better mean |
-| 8 replicas x 4 A100 | 40s | 65,536 tokens | 5.1% better p95, 54.0% better mean |
+| Best: 60s synthetic `kimi_k2_h100x8` | +15.01% | +3.93% | 1.1766x |
+| Mixed: 60s mixed `kimi_k2_h100x8` | +8.60% | +3.37% | 1.0941x |
+| Medium: 1s mixed `70b_h100x4_base` | +2.26% | +1.59% | 1.0231x |
+| Bad tail: 1s synthetic `dense1t_b300x4` | -3.05% | -16.91% | 0.9704x |
 
-This is not a failure of the idea so much as a design constraint.
+The clean takeaway:
 
-If warm time is longer than prediction lead time, do not warm that much. On
-slower hardware, the policy should either warm a shallower prefix or skip
-warming entirely.
+> BTB shines when a long shared prefix is reused over a sustained window, and
+> RDMA can create extra HBM copies before the future requests need them.
 
-The algorithm should be gated by a simple estimate:
+The 60-second synthetic case is the ideal paper case. It represents a workload
+where requests keep arriving for the same prefix long enough that one early KV
+copy can serve many later requests.
 
-```text
-warm_time(model, hardware, prefix_depth) < predicted_lead_time - safety_margin
-```
+The 1-second case is much harder. If the burst is mostly over before the copy
+pays back, extra movement can hurt the tail.
 
-No inequality, no warming.
+## When It Is Good
 
-## What About Noisy Predictors?
+BTB is a good idea when:
 
-We also added one-request decoy jobs and swept predictor precision from 1.0
-down to about 0.25.
+- the prefix is long;
+- many future requests reuse that prefix;
+- the source KV already exists in HBM;
+- the burst lasts long enough for copies to be reused;
+- target replicas have enough HBM and queue slack;
+- RDMA is cheaper than repeated prefill or remote KV access.
 
-On the GLM-like 8 x 8 H100 setup, full warming still won latency even with
-false positives:
+That is why the 60-second same-prefix workload is the best case. The movement
+cost is paid once, then amortized over many future requests.
 
-| Warm depth | Actual precision | p95 TTFT | p95 reduction vs cache-aware | Warm KV |
-| --- | ---: | ---: | ---: | ---: |
-| 32,768 tokens | 1.00 | 1.176s | 31.9% | 23.6 GB |
-| 32,768 tokens | 0.50 | 1.176s | 31.9% | 47.1 GB |
-| 32,768 tokens | 0.25 | 1.076s | 37.7% | 94.2 GB |
-| 65,536 tokens | 1.00 | 0.194s | 88.8% | 47.1 GB |
-| 65,536 tokens | 0.50 | 0.176s | 89.8% | 94.2 GB |
-| 65,536 tokens | 0.25 | 0.199s | 88.5% | 188.4 GB |
+## When It Is Bad
 
-This was mildly surprising. The hypothesis going in was that full-prefix
-warming would become fragile at moderate precision. In this roomy H100 setup,
-it did not. False positives mostly showed up as extra warm cost, not worse p95.
+BTB is bad when:
 
-That changes the claim. Partial warming is not always the latency optimum.
-Partial warming is the cheaper operating point. Full warming is best when the
-cluster has enough slack and predictor signals are good enough.
+- the burst is too short;
+- the prefix is small;
+- reuse is weak or noisy;
+- target replicas are already busy;
+- HBM pressure evicts something more useful;
+- RDMA traffic competes with more important work;
+- the workload is tail-sensitive and copied KV is not reused quickly.
 
-## Decode-Heavy Boundary
+This is why the paper should not claim "always prefetch." The right claim is
+more precise:
 
-The short-output benchmark isolates TTFT. We also tried a decode-heavy variant
-with 256 output tokens per request.
+> Predictive, tail-aware KV movement can improve TTFT for sustained
+> shared-prefix bursts, but should be gated by reuse, lead time, HBM pressure,
+> and bandwidth cost.
 
-Cache-aware p95 TTFT was 1.728s. Full adaptive warming brought p95 TTFT down to
-0.622s at perfect precision, a 64.0% reduction. At 0.5 precision, adaptive full
-warming reached 0.587s p95, a 66.0% reduction.
+## Paper Shape
 
-The bad policy was confidence-scaled warming. At 0.5 precision it underwarmed
-the true burst and hit 9.015s p95 TTFT. That is 421.7% worse than cache-aware.
+The paper should show three regimes:
 
-The lesson: being "adaptive" is not automatically safe. The safe adaptation is
-not arbitrary confidence scaling; it is warming only when there is enough idle
-time to finish the chosen depth.
+1. Best case: sustained same-prefix reuse, where BTB clearly helps.
+2. Medium case: mixed ART plus synthetic traffic, where BTB helps modestly.
+3. Worst case: short or tail-sensitive bursts, where BTB can regress.
 
-## Public Trace Boundary: Mooncake
+That gives the story a spine. We are not trying to hide the failure case. The
+failure case tells us exactly what the production gate must avoid.
 
-The synthetic workload is the target workload. We also tested a public Mooncake
-trace replay to check whether this pattern appears naturally in that trace.
+## Next Experiment
 
-Without RDMA, least-load-no-remote had p95 TTFT of 0.762s. Predictive fake
-prefill was 0.795s, about 33ms worse. Real-seed warming was 0.794s, about 32ms
-worse.
+The next clean ideal-case experiment is a 10-minute rising-load trace:
 
-With 50 GB/s/GPU RDMA enabled, reactive copy was the best baseline at 0.695s
-p95 TTFT. Prewarming plus reactive copy tied it at 0.695s. Fake prefill alone
-was 0.795s, about 100ms worse.
+- one hot long prefix;
+- request rate rises over time;
+- the detector catches the burst early;
+- `early_rdma` creates more HBM copies;
+- future requests spread across warmed replicas.
 
-That result is important:
-
-> Mooncake replay did not validate the target workload by itself.
-
-It does not seem to contain the large synchronized same-prefix bursts that make
-this idea shine. And when fast reactive RDMA is available, that becomes a very
-strong baseline.
-
-## What This Means
-
-"Bite the bullet" is not a universal routing replacement.
-
-It is a burst-aware scheduling primitive for a specific but increasingly common
-workload:
-
-- data-labeling fanout;
-- agent and subagent fanout;
-- batch scoring against a shared document;
-- multi-sample evaluation with a shared system prompt;
-- tool workflows where metadata reveals a batch before every request arrives.
-
-The positive result is strong: on H100-class simulated deployments, the target
-workload sees 67-99% p95 TTFT reductions.
-
-The boundary is also clear: the policy needs enough prediction lead time and
-enough idle/slack capacity. If warming cannot finish before the burst, warming
-can be worse than doing nothing.
-
-That gives a clean production policy:
-
-1. detect likely same-prefix burst;
-2. estimate burst size and prefix depth;
-3. estimate warm time on each candidate replica;
-4. warm the deepest prefix that can finish before the burst;
-5. route burst requests across replicas with warm KV;
-6. fall back to normal cache-aware routing when confidence, lead time, or slack
-   is insufficient.
-
-The short version:
-
-> Cache-aware routing reacts to the queue. Biting the bullet tries to move the
-> expensive prefill before the queue exists.
-
-That is the bet.
-
-## Future Work
-
-The next experiments should make the claim harder to dismiss:
-
-- split weight dtype and KV dtype in the simulator, so int4 weights with fp8 KV
-  are modeled directly;
-- add a predictor trained on job metadata, not just synthetic oracle signals;
-- test real data-labeling or agent traces with actual synchronized fanout;
-- add an online controller that chooses prefix depth from lead-time estimates;
-- compare against reactive RDMA, prefetch-from-host, and disaggregated cache
-  systems under the same workload.
-
-The strongest paper/blog version is not "we found a trick that always wins."
-It is:
-
-> In bursty same-prefix workloads, cache locality and load balancing are not
-> enough. If the burst is predictable, speculative prefill can turn idle time
-> before the burst into lower p95 TTFT during the burst.
+That experiment should plot TTFT, p95 TTFT, HBM hit rate, RDMA GB, warm busy
+time, and time-to-payback. It is the clearest version of the bet: use early
+signal to move KV before the queue forms.

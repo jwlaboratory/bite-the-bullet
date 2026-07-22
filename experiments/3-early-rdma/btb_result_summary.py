@@ -189,7 +189,7 @@ def print_tsv(rows: list[dict]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("paths", nargs="*", default=["experiments/utility-gate/results/btb_utility_gate_*.json"])
+    parser.add_argument("paths", nargs="*", default=["experiments/3-early-rdma/results/btb_utility_gate_*.json"])
     parser.add_argument("--format", choices=["markdown", "tsv"], default="markdown")
     parser.add_argument("--group-by-label", action="store_true")
     return parser.parse_args()

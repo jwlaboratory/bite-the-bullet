@@ -12,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPERIMENT = ROOT / "experiments" / "utility-gate" / "btb_utility_gate.py"
-OUT_DIR = ROOT / "experiments" / "utility-gate" / "results" / "art_model_hardware_sweep"
+OUT_DIR = ROOT / "experiments" / "3-early-rdma" / "results" / "art_model_hardware_sweep"
 
 
 BASE_ARGS = [

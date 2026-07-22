@@ -1,99 +1,61 @@
-# bite-the-bullet
+# Bite the Bullet
 
-Research artifacts for **Biting the Bullet**: predicting synchronized
-same-prefix inference bursts and speculatively warming prefix KV before the
-queue forms.
+Research repo for **predictive KV movement in bursty LLM inference**.
 
-This repo contains the experiment scripts, saved results, and blog draft. The
-simulator engine itself lives separately in `inference-sim`.
+## The claim
+
+Detect sustained shared-prefix reuse, then RDMA-copy existing KV into HBM on
+less-busy replicas *before* later requests arrive — while the fabric is still
+quiet — instead of recomputing the prefix or contending for it reactively during
+the spike. The active policy is `early_rdma`.
+
+## The argument, in reading order
+
+The repo is laid out as the argument that motivates that claim. Read it
+top to bottom:
+
+| Step | Question | Where |
+|------|----------|-------|
+| 0 | Does this workload even exist in public traces? | [`workload/audit/`](workload/audit/) — mostly **no**, so we synthesize it |
+| 1 | Build the synthetic workload | [`workload/generate/`](workload/generate/) — the Bursted-ART dataset |
+| 2 | Why would moving KV ever beat recomputing it? | [`experiments/1-prefill-vs-transfer/`](experiments/1-prefill-vs-transfer/) — transfer is 44–48× cheaper |
+| 3 | When does locality/routing actually matter under a burst? | [`experiments/2-burst-routing/`](experiments/2-burst-routing/) — only when sharing is off or the fabric congests |
+| 4 | **The policy: move KV predictively, ahead of the burst** | [`experiments/3-early-rdma/`](experiments/3-early-rdma/) — ★ the headline claim |
+
+The write-up lives in [`BLOG.md`](BLOG.md) (long form) and
+[`experiments/3-early-rdma/PAPER.md`](experiments/3-early-rdma/PAPER.md) (short
+paper memo).
 
 ## Layout
 
-- `bite-the-bullet/`: predictive KV warming, ART/Mooncake predictor, and
-  end-to-end warming evaluators.
-- `partial-prefill/`: partial-prefix and adaptive idle-only warming sweeps.
-- `experiments/utility-gate/`: real-trace utility-gate harness, model/hardware
-  sweeps, and saved utility-gate results.
-- `clean-experiments/`: clean experiment specs, result JSONs, cross-system
-  matrix, and the main blog draft.
-- `data-generation/`: scripts for building BTB JSONL datasets; generated
-  outputs under `data-generation/out/` are ignored.
-- `archive/`: older exploratory runs and paper notes that are useful history
-  but not the current runnable path.
-- `BLOG.md`: current long-form research blog draft.
+```
+workload/            build and interrogate the target workload
+  generate/            Bursted-ART dataset generation (-> HF)
+  audit/               is the same-prefix fan-out burst present in real traces?
+experiments/         the studies, numbered in argument order
+  1-prefill-vs-transfer/   cost model: transfer vs recompute
+  2-burst-routing/         least_load vs cache_aware under a flash crowd
+  3-early-rdma/            THE claim; owns its results/ and PAPER.md
+BLOG.md              long-form write-up
+FUTURE_IDEAS.md      backlog kept for later
+sim_path.py          shared shim that locates the inference-sim checkout
+archive/             history, not the current claim (see archive/README.md)
+```
 
-## Dependency On The Simulator
+## Simulator dependency
 
-The experiment scripts use the simulator modules from a sibling checkout:
+Every live experiment runs on a sibling `inference-sim` checkout:
 
 ```text
 ../inference-sim
 ```
 
-You can override that path with:
+Override with:
 
 ```bash
 export INFERENCE_SIM_ROOT=/path/to/inference-sim
 ```
 
-Recommended local layout:
-
-```text
-jwlabs/
-  inference-sim/
-  bite-the-bullet/
-```
-
-## Reproduce The Main Result
-
-From this repo root:
-
-```bash
-python3 partial-prefill/sweep_partial_prefill.py \
-  --imbalance-abs 8 \
-  --model-preset glm52-int4 \
-  --num-replicas 8 \
-  --gpus-per-replica 8 \
-  --gpu H100 \
-  --max-batch 256 \
-  --block-tokens 256 \
-  --num-bursts 8 \
-  --burst-size 500 \
-  --prefix-tokens 65536 \
-  --suffix-tokens 256 \
-  --output-tokens 1 \
-  --first-burst-s 20 \
-  --burst-spacing-s 40 \
-  --burst-window-s 1 \
-  --num-decoys 0 \
-  --background-requests 0 \
-  --lead-s 6 \
-  --precision-sweep 1 \
-  --recall 1 \
-  --trials 5 \
-  --warm-tokens 16384 32768 65536 \
-  --out clean-experiments/results/experiment_01_target_burst.json
-```
-
-The saved result summary is in:
-
-```text
-clean-experiments/results/SUMMARY.md
-```
-
-Cross-system percentages are in:
-
-```text
-clean-experiments/results/standard-systems/SUMMARY.md
-```
-
-## Main Claim
-
-For synchronized same-prefix bursts, moving prefix prefill off the request
-critical path can reduce p95 TTFT by **67-99%** on H100-class simulated
-deployments.
-
-The claim is deliberately scoped. Predictive warming is not a universal
-replacement for cache-aware routing or reactive RDMA. It helps when the burst is
-predictable, the prefix is shared, and the system has enough lead time/slack to
-finish warming before the burst lands.
+Live experiment scripts assume they sit exactly two directories deep
+(`experiments/<name>/script.py`) and that `sim_path.py` stays at the repo
+root — keep that shape when adding experiments.

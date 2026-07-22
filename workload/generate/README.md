@@ -2,6 +2,9 @@
 
 Builds Bursted-ART: ART windows plus synthetic same-prefix bursts.
 
+Hugging Face:
+[shreybirmiwal/Bursted-ART](https://huggingface.co/datasets/shreybirmiwal/Bursted-ART)
+
 Canonical outputs:
 
 - `out/Bursted-ART`
@@ -27,5 +30,5 @@ Upload:
 ```bash
 python3 data-generation/upload_to_hf.py \
   --dataset-dir data-generation/out/Bursted-ART \
-  --repo-id YOUR_USERNAME/Bursted-ART
+  --repo-id shreybirmiwal/Bursted-ART
 ```
