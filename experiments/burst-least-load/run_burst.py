@@ -41,7 +41,30 @@ import config                       # noqa: E402
 from simulate import run            # noqa: E402
 from workload import Request        # noqa: E402
 
+import btb_policy                   # noqa: E402
+btb_policy.register()              # installs "early_rdma" into the sim's POLICIES
+
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def set_btb_knobs(cfg, warm_copies):
+    """BTB early_rdma parameters (see btb_policy). warm_blocks = the shared
+    family prefix; key = its first few blocks; a prefix warms once it is seen
+    >= THRESHOLD times in WINDOW."""
+    cfg.BTB_WARM_BLOCKS = PREFIX_BLOCKS
+    cfg.BTB_KEY_BLOCKS = 4
+    cfg.BTB_THRESHOLD = 4
+    cfg.BTB_WINDOW_S = 2.0
+    cfg.BTB_HORIZON_S = 120.0
+    cfg.BTB_WARM_COPIES = warm_copies
+
+
+def run_seeded(policy, requests, cfg):
+    """The sim's router breaks routing ties with the global RNG, which the sim
+    never seeds. Seed it here so results are reproducible and every policy sees
+    the same tie-break stream (a fair A/B)."""
+    random.seed(SEED)
+    return run(policy, requests, cfg)
 
 
 def run_seeded(policy, requests, cfg):
@@ -262,17 +285,20 @@ def main():
 
 
 def scaling_sweep(base_cluster):
-    """Does RDMA congestion bite harder on bigger clusters? Scale the cluster
-    (and the burst with it, to hold per-node load ~constant) and measure the
-    least_load-vs-cache_aware TTFT gap with the fabric contending. Incast fan-in
-    grows with node count, so the gap should widen."""
+    """Head-to-head under a congested fabric across cluster sizes: least_load vs
+    cache_aware vs early_rdma (BTB). Scale the burst with the cluster to hold
+    per-node load ~constant. Incast fan-in grows with node count, so the routing
+    that avoids cross-node transfers (cache_aware / BTB) should pull away from
+    least_load as the cluster grows."""
     global BURST_SIZE
     spec = base_cluster[0][1]
     gpus = base_cluster[0][2]
     saved = BURST_SIZE
     per_node = saved // len(base_cluster)
-    print("=== scaling sweep: RDMA congestion vs cluster size (congested fabric) ===")
-    print(f"{'nodes':>6} {'burst':>7} {'LL ttft':>8} {'CA ttft':>8} {'CA gap':>7}")
+    print("=== scaling sweep: least_load vs cache_aware vs early_rdma "
+          "(congested fabric) ===")
+    print(f"{'nodes':>6} {'burst':>7} {'LL ttft':>8} {'CA ttft':>8} "
+          f"{'BTB ttft':>9} {'CA gap':>7} {'BTB gap':>8}")
     rows = []
     for n_nodes in (4, 8, 16, 32):
         BURST_SIZE = per_node * n_nodes          # hold per-node load constant
@@ -282,14 +308,19 @@ def scaling_sweep(base_cluster):
         cfg.RDMA_CONGESTION = True
         cfg.CLUSTER = [(f"node{i}", spec, gpus) for i in range(n_nodes)]
         cfg.DISK_CACHE = True
+        set_btb_knobs(cfg, warm_copies=4)
         ll = run_seeded("least_load", reqs, cfg)["metrics"]
         ca = run_seeded("cache_aware", reqs, cfg)["metrics"]
-        gap = (ll["mean_ttft"] - ca["mean_ttft"]) / ll["mean_ttft"] * 100
+        btb = run_seeded("early_rdma", reqs, cfg)["metrics"]
+        ca_gap = (ll["mean_ttft"] - ca["mean_ttft"]) / ll["mean_ttft"] * 100
+        btb_gap = (ll["mean_ttft"] - btb["mean_ttft"]) / ll["mean_ttft"] * 100
         rows.append({"nodes": n_nodes, "burst": BURST_SIZE,
                      "ll_ttft": ll["mean_ttft"], "ca_ttft": ca["mean_ttft"],
-                     "gap_pct": gap})
+                     "btb_ttft": btb["mean_ttft"],
+                     "gap_pct": ca_gap, "btb_gap_pct": btb_gap})
         print(f"{n_nodes:>6} {BURST_SIZE:>7} {ll['mean_ttft']:>7.1f}s "
-              f"{ca['mean_ttft']:>7.1f}s {gap:>6.0f}%")
+              f"{ca['mean_ttft']:>7.1f}s {btb['mean_ttft']:>8.1f}s "
+              f"{ca_gap:>6.0f}% {btb_gap:>7.0f}%")
     BURST_SIZE = saved
     print()
     return rows

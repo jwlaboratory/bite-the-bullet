@@ -55,10 +55,13 @@ almost the same curve when the cache is shared.
 choice is **even** (TTFT 81 vs 80 s); a contending fabric is a **mild ~3% tax**;
 isolated replicas is where cache_aware clearly wins (**~24%**, 93 vs 122 s).
 
-**`scaling.png`** — Congestion's effect **grows with cluster size**. Holding
-per-node load constant, the cache_aware TTFT advantage under a congested fabric
-widens **3% → 8% → 20% → 35%** across 4 → 8 → 16 → 32 nodes, because RDMA incast
-fan-in scales with node count. Real deployments are hundreds of nodes.
+**`scaling.png`** — The three-way head-to-head under a congested fabric across
+cluster sizes: **least_load vs cache_aware vs early_rdma (BTB)**. Congestion's
+effect grows with cluster size — cache_aware's TTFT advantage over least_load
+widens **3% → 8% → 20% → 35%** (4 → 8 → 16 → 32 nodes) as incast fan-in scales.
+**BTB tracks cache_aware but never beats it** (−2% / 2% / 15% / 34%): on tiny
+clusters its warming overhead is a slight net loss; at scale it converges to
+cache_aware. See finding 7 for why.
 
 **`metrics_by_condition.png`** — Every headline metric (mean & peak queue wait,
 mean TTFT, mean prefix+prefill, max queue depth, throughput) across all four
@@ -106,9 +109,28 @@ touches cache_aware but slows the cache-blind policies.
 
 6. **This is the motivation for predictive KV movement.** The whole gap between
    "routing barely matters" and "cache_aware wins" is the value of getting the
-   right KV onto the right node cheaply — which is exactly what this repo's
-   `early_rdma` policy tries to do *ahead* of the burst (while the fabric is
-   quiet) rather than contending for it reactively during the spike.
+   right KV onto the right node cheaply — which is exactly what `early_rdma` (BTB)
+   tries to do *ahead* of the burst (while the fabric is quiet) rather than
+   contending for it reactively during the spike.
+
+7. **BTB matches cache_aware here but does not beat it — because in this sim
+   reactive caching already replicates hot prefixes.** `early_rdma` (ported to
+   the sim in `btb_policy.py`) detects a sustained shared-prefix burst, RDMA-copies
+   the prefix onto the least-busy replicas ahead of demand, and routes active-prefix
+   requests to the least-loaded warm replica. Under the congested/scaling sweep it
+   tracks cache_aware (−2% / 2% / 15% / 34% vs least_load at 4/8/16/32 nodes) but
+   never overtakes it. Why: the simulator warms a node whenever it *serves* a
+   request (`node.insert`), so a hot prefix naturally replicates across every node
+   that touches it, and cache_aware balances across those replicas for free. BTB's
+   only structural edge is warming a replica *before* its first-touch — real, but
+   small once first-touch is amortized, and offset by warming interference (a warm
+   copy serializes with the target's compute, the sim's own convention for RDMA).
+   BTB's *positive* result in `../results/PAPER.md` comes from a different regime
+   (65,536-token prefixes, 1 output token — prefill-dominated, so first-touch cost
+   dwarfs everything) **and** a harness with no fabric congestion. The honest read:
+   under a strong reactive cache_aware baseline plus a congestion model, BTB's
+   marginal value over cache_aware is small in this simulator — it wins clearly
+   only when first-touch is catastrophic and there is genuine lead time to prewarm.
 
 ### Caveats
 
@@ -123,3 +145,10 @@ touches cache_aware but slows the cache-blind policies.
   in the `isolated` condition the crippled-bandwidth fallback is still visible in
   the prefill/throughput panels rather than the tier mix — so `cache_tier.png`
   is shown for the shared condition only.
+- BTB's warm copy serializes with the target replica's compute clock (the sim's
+  convention for RDMA reuse). Real RDMA GPUDirect DMA overlaps decode more than
+  that, so this **under**-credits BTB; conversely, treating warming as fully free
+  would over-credit it. The mean-field congestion model can't cleanly represent
+  the fabric as a shared resource, so BTB's exact margin over cache_aware is
+  inside the model's error bars — the robust conclusion is only "BTB ≈ cache_aware,
+  both ≫ least_load at scale," not a precise BTB-vs-cache_aware number.

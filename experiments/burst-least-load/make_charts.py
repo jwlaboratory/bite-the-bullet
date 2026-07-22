@@ -229,19 +229,24 @@ def chart_scaling(data):
         return
     nodes = [r["nodes"] for r in rows]
     x = np.arange(len(nodes))
-    fig, (ax, ax2) = plt.subplots(1, 2, figsize=(12, 5.2),
+    fig, (ax, ax2) = plt.subplots(1, 2, figsize=(12.5, 5.4),
                                   gridspec_kw={"width_ratios": [1.35, 1]})
 
     ll = [r["ll_ttft"] for r in rows]
     ca = [r["ca_ttft"] for r in rows]
+    btb = [r.get("btb_ttft") for r in rows]
     ax.plot(x, ll, "-o", color=POLICY_COLOR["least_load"], lw=2.2, ms=8,
             label="least_load")
     ax.plot(x, ca, "-o", color=POLICY_COLOR["cache_aware"], lw=2.2, ms=8,
             label="cache_aware")
-    for xi, a, b in zip(x, ll, ca):
+    if all(v is not None for v in btb):
+        ax.plot(x, btb, "--D", color=POLICY_COLOR["random"], lw=2, ms=7,
+                label="early_rdma (BTB)")
+    for xi, a in zip(x, ll):
         ax.annotate(f"{a:.0f}s", (xi, a), textcoords="offset points",
-                    xytext=(0, 8), ha="center", fontsize=9,
+                    xytext=(0, 9), ha="center", fontsize=9,
                     color=POLICY_COLOR["least_load"], fontweight="bold")
+    for xi, b in zip(x, ca):
         ax.annotate(f"{b:.0f}s", (xi, b), textcoords="offset points",
                     xytext=(0, -16), ha="center", fontsize=9,
                     color=POLICY_COLOR["cache_aware"], fontweight="bold")
@@ -250,28 +255,38 @@ def chart_scaling(data):
     ax.set_xticklabels([f"{n} nodes" for n in nodes])
     ax.set_ylabel("mean time to first token (s)")
     ax.set_ylim(bottom=0)
-    ax.set_title("Congested fabric: cache_aware pulls away at scale",
+    ax.set_title("Congested fabric: cache_aware & BTB pull away from least_load",
                  color=INK, fontsize=12, fontweight="bold", loc="left", pad=10)
     ax.legend(frameon=False, loc="lower left")
 
-    gap = [r["gap_pct"] for r in rows]
-    bars = ax2.bar(x, gap, 0.6, color=POLICY_COLOR["cache_aware"],
-                   edgecolor=SURFACE, linewidth=1.2)
-    for xi, g in zip(x, gap):
-        ax2.text(xi, g + 0.6, f"{g:.0f}%", ha="center", va="bottom",
-                 fontsize=10, color=INK, fontweight="bold")
+    # right panel: TTFT advantage over least_load, cache_aware vs BTB
+    w = 0.38
+    ca_gap = [r["gap_pct"] for r in rows]
+    btb_gap = [r.get("btb_gap_pct", 0) for r in rows]
+    ax2.bar(x - w / 2, ca_gap, w, color=POLICY_COLOR["cache_aware"],
+            edgecolor=SURFACE, linewidth=1.1, label="cache_aware")
+    ax2.bar(x + w / 2, btb_gap, w, color=POLICY_COLOR["random"],
+            edgecolor=SURFACE, linewidth=1.1, label="early_rdma (BTB)")
+    for xi, g in zip(x, ca_gap):
+        ax2.text(xi - w / 2, g + 0.6, f"{g:.0f}", ha="center", va="bottom",
+                 fontsize=8.5, color=INK2)
+    for xi, g in zip(x, btb_gap):
+        ax2.text(xi + w / 2, g + 0.6, f"{g:.0f}", ha="center", va="bottom",
+                 fontsize=8.5, color=INK2)
     style(ax2)
     ax2.set_xticks(x)
     ax2.set_xticklabels([str(n) for n in nodes])
     ax2.set_xlabel("cluster size (nodes)")
-    ax2.set_ylabel("cache_aware TTFT advantage (%)")
-    ax2.set_ylim(0, max(gap) * 1.25)
-    ax2.set_title("Gap widens with fan-in", color=INK, fontsize=12,
-                  fontweight="bold", loc="left", pad=10)
+    ax2.set_ylabel("TTFT advantage over least_load (%)")
+    ax2.set_ylim(min(0, min(btb_gap) - 3), max(ca_gap) * 1.28)
+    ax2.set_title("BTB tracks cache_aware — never beats it", color=INK,
+                  fontsize=12, fontweight="bold", loc="left", pad=10)
+    ax2.legend(frameon=False, loc="upper left", fontsize=9)
     fig.text(0.5, 0.005,
-             "Burst scaled with the cluster to hold per-node load constant; "
-             "RDMA congestion on. Fewer nodes = less incast = smaller gap.",
-             color=MUTED, fontsize=9, ha="center")
+             "Burst scaled with the cluster to hold per-node load constant; RDMA "
+             "congestion on. In this sim, serving a request warms its node, so "
+             "cache_aware already replicates hot prefixes — leaving little for BTB to add.",
+             color=MUTED, fontsize=8.5, ha="center")
     fig.tight_layout(rect=(0, 0.04, 1, 1))
     fig.savefig(os.path.join(CHARTS, "scaling.png"), dpi=150)
     plt.close(fig)
