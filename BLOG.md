@@ -34,7 +34,7 @@ The reason is structural: **prefill is compute-bound while reuse is bandwidth-bo
 
 ![Prefill vs. KV-cache transfer, log-log, 4×H100 / Llama-3.3-70B](1-prefill-vs-transfer/figures/prefill-vs-transfer-chart.png)
 
-Time to make N tokens of KV resident (milliseconds):
+Time to make N tokens of KV resident (milliseconds), on the standard setup — **one node = 4×H100 tensor-parallel, serving Llama-3.3-70B fp16** (KV ≈ 320 KiB/token, MFU 0.5):
 
 | Source | 500 | 1k | 2k | 8k | 16k | 32k | vs. prefill |
 |--------|----:|---:|---:|---:|----:|----:|------------:|
@@ -137,7 +137,13 @@ We replay **Bursted-ART** — the full test set, real ART traffic plus synchroni
 | kimi_k2_h100x8 | 0.093s | 0.832s | 0.048s | 0.167s | **+48.1%** | +79.9% |
 | dense1t_b300x4 | 436.8s | 926.1s | 392.0s | 857.9s | **+10.3%** | +7.4% |
 
-BTB cuts **mean TTFT by 10–60%** (median ~51%), and on the H100 setups the p95 tail improves even more (+78–82% for qwen3-8b, glm52, kimi-k2) because warming clears the queue that cache-aware builds when the whole burst piles onto one node. The 70b setup is the interesting edge: mean drops 54% but p95 is flat. That's not a bug — the p95 request is the *very first* request of a burst, which has to eat a full cold prefill of the 65,536-token shared prefix before any warm copy can exist: `65,536 × 71.4 µs ≈ 4.68 s`, essentially the entire 4.70 s p95. BTB can't warm a prefix it hasn't seen yet, so it only helps the requests that follow — which is exactly why the *mean* still drops 54%. The trillion-param dense1t/B300 setup is compute-so-heavy that TTFT is dominated by raw prefill and queueing regardless of routing, so warming buys a smaller (but still real) 10%.
+BTB cuts **mean TTFT by 10–60%** (median ~51%), and on the H100 setups the p95 tail improves even more (+78–82% for qwen3-8b, glm52, kimi-k2) because warming clears the queue that cache-aware builds when the whole burst piles onto one node.
+
+The table is about **TTFT, not steady-state decode TPS**. BTB does not make the model decode tokens faster; it gets repeated-prefix requests into decode sooner by avoiding shared-prefix recompute and the hot-node queue that recompute creates.
+
+The 70b setup is the interesting edge: mean drops 54% but p95 is flat. That's not a bug — the p95 request is the *very first* request of a burst, which has to eat a full cold prefill of the 65,536-token shared prefix before any warm copy can exist: `65,536 × 71.4 µs ≈ 4.68 s`, essentially the entire 4.70 s p95. BTB can't warm a prefix it hasn't seen yet, so it only helps the requests that follow — which is exactly why the *mean* still drops 54%.
+
+The dense1t/B300 row looks backward only if you read "bigger model" as a single scalar. The pure economics are actually strongest there: the 65,536-token shared-prefix recompute is ~29.1 s, while the RDMA copy is ~40 ms. But the reported speedup is end-to-end TTFT over full mixed windows. Every synthetic request still has a unique 256-token suffix, which costs ~114 ms to prefill on the dense 1T model, and the huge model leaves tight KV headroom, so bursts build a large queue even after the shared prefix is warm. Warming removes the repeated shared-prefix miss, but it cannot remove unavoidable per-request suffix prefill or decode pressure, so the percentage win is smaller (but still real) at 10%.
 
 # Future ideas
 
