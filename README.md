@@ -4,6 +4,8 @@ Detect a sustained shared-prefix burst, then RDMA-copy its KV onto less-busy
 replicas **before** later requests arrive — so those requests land on a warm
 node instead of recomputing the prefix. The policy is `early_rdma`.
 
+Writeup: [jwlabs.vercel.app/post/biting-the-bullet](https://jwlabs.vercel.app/post/biting-the-bullet)
+
 The repo is three folders:
 
 | # | Folder | What |
